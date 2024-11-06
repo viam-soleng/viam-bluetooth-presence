@@ -11,6 +11,7 @@ from viam.proto.app.robot import ComponentConfig
 from viam.proto.common import ResourceName, Vector3
 from viam.resource.base import ResourceBase
 from viam.resource.types import Model, ModelFamily
+from viam.utils import ValueTypes, struct_to_dict
 
 from viam.components.sensor import Sensor
 from viam.logging import getLogger
@@ -23,6 +24,8 @@ import dbus.exceptions
 import dbus.mainloop.glib
 import dbus.service
 import uuid
+from pathlib import Path
+import datetime
 
 try:
     from gi.repository import GLib
@@ -48,13 +51,12 @@ class bluetooth(Sensor, Reconfigurable):
     MODEL: ClassVar[Model] = Model(ModelFamily("mcvella", "presence"), "bluetooth")
     
     advertisement_name: str
-    # TODO - put this in a place it won't be deleted when module is updated
-    db_conn = sqlite3.connect('paired_devices.db')
     advertisement = None
     agent = None
     discovery_active = False
     manager = None
     bus = None
+    pairing_accept_timeout = int
 
     # Constructor
     @classmethod
@@ -73,7 +75,10 @@ class bluetooth(Sensor, Reconfigurable):
         if self.manager:
             self.manager.running = False
             self.manager.stop()
+
         self.advertisement_name = config.attributes.fields["advertisement_name"].string_value or "Viam Presence"
+        self.pairing_accept_timeout = int(config.attributes.fields["pairing_accept_timeout"].number_value) or 30
+
         try:
             asyncio.ensure_future(self.start_btmanager())
         except Exception as e:
@@ -88,38 +93,37 @@ class bluetooth(Sensor, Reconfigurable):
         return await super().close()
     
     async def start_btmanager(self):
-        self.create_db_table()
-        self.manager = BluetoothManager(auto_accept=True, custom_name=self.advertisement_name)
+        self.manager = BluetoothManager(auto_accept=False, custom_name=self.advertisement_name, pairing_accept_timeout=self.pairing_accept_timeout)
         self.bus = dbus.SystemBus()
         self.bus.add_signal_receiver(
             self.manager.device_found,
             dbus_interface = DBUS_OM_IFACE,
             signal_name = "InterfacesAdded")
         await self.manager.start()
-    
-    def create_db_table(self):
-        cursor = self.db_conn.cursor()
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS paired_devices (
-                id TEXT PRIMARY KEY,
-                address TEXT,
-                name TEXT,
-                uuid TEXT,
-                last_seen TIMESTAMP
-            )
-        ''')
-        self.db_conn.commit()
 
     async def get_readings(
         self, *, extra: Optional[Mapping[str, Any]] = None, timeout: Optional[float] = None, **kwargs
     ) -> Mapping[str, SensorReading]:
         ret = { 
             "present_devices": self.manager.present_devices,
-            "paired_devices": self.manager.paired_devices,
+            "known_devices": self.manager.paired_devices,
             "pairing_requests": self.manager.get_pairing_requests()
         }
         return ret
 
+    async def do_command(
+                self,
+                command: Mapping[str, ValueTypes],
+                *,
+                timeout: Optional[float] = None,
+                **kwargs
+            ) -> Mapping[str, ValueTypes]:
+        result = {}
+        if 'command' in command:
+            if command['command'] == 'accept_pairing_request':
+                self.manager.accept_pairing_request(command["device"])
+            if command['command'] == 'forget_device':
+                self.manager.forget_device(command["device"])  
 class Advertisement(dbus.service.Object):
     PATH_BASE = '/org/bluez/example/advertisement'
 
@@ -158,7 +162,8 @@ class Advertisement(dbus.service.Object):
     def add_service_uuid(self, uuid):
         if not self.service_uuids:
             self.service_uuids = []
-        self.service_uuids.append(uuid)
+        if uuid not in self.service_uuids:
+            self.service_uuids.append(uuid)
 
     def add_local_name(self, name):
         self.local_name = name
@@ -170,7 +175,7 @@ class Advertisement(dbus.service.Object):
         LOGGER.info('%s: Released!', self.path)
 
 class Agent(dbus.service.Object):
-    def __init__(self, bus, path, auto_accept=True):
+    def __init__(self, bus, path, auto_accept=False):
         self.bus = bus
         self.path = path
         self.auto_accept = auto_accept
@@ -192,7 +197,6 @@ class Agent(dbus.service.Object):
         if self.auto_accept:
             self.add_paired_device(device)
             return
-        self.pairing_requests.append(device)
         return
 
     @dbus.service.method(AGENT_IFACE, in_signature="", out_signature="")
@@ -209,22 +213,16 @@ class Agent(dbus.service.Object):
 
     @dbus.service.method(AGENT_IFACE, in_signature="ou", out_signature="")
     def RequestConfirmation(self, device, passkey):
+        # ensure leading zero is cap
+        passkey = f'{passkey:06}'
+
         LOGGER.info(f"RequestConfirmation ({device}, {passkey})")
         if self.auto_accept:
             self.add_paired_device(device)
             return
-        self.pairing_requests.append((device, passkey))
+        self.pairing_requests.append({ "device": device, "passkey": passkey, "when": time.time() })
+
         return
-
-    @dbus.service.method(AGENT_IFACE, in_signature="o", out_signature="s")
-    def RequestPinCode(self, device):
-        LOGGER.info(f"RequestPinCode ({device})")
-        return "000000"
-
-    @dbus.service.method(AGENT_IFACE, in_signature="o", out_signature="u")
-    def RequestPasskey(self, device):
-        LOGGER.info(f"RequestPasskey ({device})")
-        return dbus.UInt32(123456)
 
     def add_paired_device(self, device):
         if self.manager:
@@ -233,7 +231,7 @@ class Agent(dbus.service.Object):
             LOGGER.error("BluetoothManager reference not set in Agent")
 
 class BluetoothManager:
-    def __init__(self, auto_accept=True, custom_name="Viam Presence"):
+    def __init__(self, auto_accept=False, custom_name="Viam Presence", pairing_accept_timeout=30):
         dbus.mainloop.glib.DBusGMainLoop(set_as_default=True)
         self.bus = dbus.SystemBus()
         
@@ -251,13 +249,14 @@ class BluetoothManager:
 
         self.paired_devices = {}
         self.present_devices = {}
-        self.db_conn = sqlite3.connect('paired_devices.db')
+        self.db_conn = sqlite3.connect( str(Path.home()) + '/.viam/paired_devices.db')        
         self.create_db_table()
         self.advertisement = None
         self.agent = None
         self.auto_accept = auto_accept
         self.discovery_active = False
         self.custom_name = custom_name
+        self.pairing_accept_timeout = pairing_accept_timeout
 
     def create_db_table(self):
         cursor = self.db_conn.cursor()
@@ -285,7 +284,9 @@ class BluetoothManager:
             return
 
         self.advertisement = Advertisement(self.bus, 0, 'peripheral')
-        self.advertisement.add_service_uuid("180D")
+
+        generic_service_uuid = "00001000-0000-1000-8000-00805F9B34FB"
+        self.advertisement.add_service_uuid(generic_service_uuid)
         self.advertisement.add_local_name(self.custom_name)
 
         self.advertisement.include_tx_power = True
@@ -297,7 +298,7 @@ class BluetoothManager:
             LOGGER.info("Advertisement started")
         except Exception as e:
             LOGGER.error(f"Error registering advertisement: {e}")
-
+           
     def stop_advertising(self):
         if self.advertisement:
             try:
@@ -315,26 +316,74 @@ class BluetoothManager:
     def register_ad_error_cb(self, error):
         LOGGER.error(f"Failed to register advertisement: {error}")
 
-    def set_auto_accept(self, auto_accept):
-        self.auto_accept = auto_accept
-        if self.agent:
-            self.agent.auto_accept = auto_accept
-
     def get_pairing_requests(self):
-        if self.agent:
-            return self.agent.pairing_requests
-        return []
+        if not self.agent or not isinstance(self.agent.pairing_requests, list):
+            return []
+        
+        pairing_requests = []
+        current_time = time.time()
+        for i, request in enumerate(self.agent.pairing_requests):
+            if current_time - request["when"] < self.pairing_accept_timeout:
+                pairing_requests.append ({
+                    'passkey': request["passkey"],
+                    'device': str(request["device"]),
+                    'when': datetime.datetime.fromtimestamp(request["when"]).isoformat()
+                })
+            else:
+                del self.agent.pairing_requests[i]
+        return pairing_requests
 
+    def remove_physical_pairing(self, device_path):
+        try:
+            adapter = dbus.Interface(self.bus.get_object(BLUEZ_SERVICE_NAME, self.adapter_path), ADAPTER_IFACE)
+            adapter.RemoveDevice(device_path)
+            LOGGER.info(f"Successfully removed pairing for device: {device_path}")            
+            return True
+        except dbus.exceptions.DBusException as e:
+            LOGGER.error(f"Failed to remove pairing for device {device_path}: {e}")
+            return False
+
+    def remove_device_from_db(self, device_id):
+        cursor = self.db_conn.cursor()
+        cursor.execute('DELETE FROM paired_devices WHERE id = ?', (device_id,))
+        self.db_conn.commit()
+        LOGGER.info(f"Removed device {device_id} from database")
+
+    def remove_all_physical_pairings(self):
+        objects = self.om.GetManagedObjects()
+        removed_count = 0
+        for path, interfaces in objects.items():
+            if DEVICE_IFACE in interfaces:
+                if self.remove_physical_pairing(path):
+                    removed_count += 1
+        LOGGER.info(f"Removed {removed_count} paired devices")
+        return removed_count
 
     def accept_pairing_request(self, device):
-        if self.agent and device in self.agent.pairing_requests:
-            self.agent.pairing_requests.remove(device)
-            device_obj = dbus.Interface(self.bus.get_object(BLUEZ_SERVICE_NAME, device), DEVICE_IFACE)
-            device_obj.Pair()
-            self.add_paired_device(device)  # Add device after pairing
-            LOGGER.info(f"Pairing accepted and device added for: {device}")
+        if self.agent:
+            paired = False
+            for i, request in enumerate(self.agent.pairing_requests):
+                if request["device"] == device:
+                    del self.agent.pairing_requests[i]
+                    self.add_paired_device(device)
+                    self.remove_all_physical_pairings()
+                    paired = True
+            if not paired:
+                LOGGER.warning(f"No pairing request found for device: {device}")
         else:
-            LOGGER.warning(f"No pairing request found for device: {device}")
+            LOGGER.error("Agent not initialized")
+
+    def forget_device(self, device):
+        if self.agent:
+            forgot = False
+            if device in self.paired_devices:
+                self.remove_device_from_db(device)
+                del self.paired_devices[device]
+                LOGGER.info(f"Known device forgotten: {device}")
+            else:
+                LOGGER.warning(f"Known device not found: {device}")
+        else:
+            LOGGER.error("Agent not initialized")    
 
     def add_paired_device(self, device_path):
         device = dbus.Interface(self.bus.get_object(BLUEZ_SERVICE_NAME, device_path), DBUS_PROP_IFACE)
@@ -356,6 +405,7 @@ class BluetoothManager:
         }
         self.update_device_in_db(device_id, address, name, device_uuid)
         LOGGER.info(f"Added paired device to database: {name} ({address})")
+
 
     async def start(self):
         LOGGER.info("Starting Bluetooth Manager...")
@@ -468,8 +518,6 @@ class BluetoothManager:
         for device_id, device_info in list(self.paired_devices.items()):
             if device_info['address'] not in active_devices:
                 LOGGER.debug(f"Previously paired device no longer detected: {device_info['name']} ({device_info['address']})")
-                # Optionally, you can remove the device from the paired_devices list
-                # del self.paired_devices[device_id]
             else:
                 updated_present_devices[device_id] = self.paired_devices[device_id]
         self.present_devices = updated_present_devices
@@ -487,7 +535,7 @@ class BluetoothManager:
                 LOGGER.debug(f"Attempting to automatically connect to known device: {name} ({address})")
                 self.auto_connect_device(address)
             else:
-                LOGGER.info(f"Recognized and present paired device: {name} ({address})")
+                LOGGER.debug(f"Recognized and present paired device: {name} ({address})")
                 return True
         else:
             LOGGER.debug(f"Unknown device detected: {name} ({address})")
@@ -536,7 +584,7 @@ class BluetoothManager:
                 LOGGER.debug(f"Device {address} present check: Connected={connected}, RSSI={rssi}, Timestamp available: {timestamp is not None}")
 
                 # Consider the device present if it's connected or has a valid RSSI
-                is_present = connected or (rssi is not None and rssi < 0)
+                is_present = connected or (rssi is not None and rssi <= 0)
 
                 if timestamp is not None:
                     current_time = int(time.time() * 1000)  # Convert to milliseconds
@@ -583,26 +631,3 @@ class BluetoothManager:
             if interfaces[DEVICE_IFACE]["Address"] == address:
                 return path
         return None
-
-    def check_nearby_devices(self):
-        nearby_devices = []
-        objects = self.om.GetManagedObjects()
-        for path, interfaces in objects.items():
-            if DEVICE_IFACE not in interfaces:
-                continue
-            properties = interfaces[DEVICE_IFACE]
-            if not properties:
-                continue
-            if properties["Connected"]:
-                address = properties["Address"]
-                name = properties.get("Name", "<unknown>")
-                uuids = properties.get("UUIDs", [])
-                device_uuid = uuids[0] if uuids else ""
-                device_id = str(uuid.uuid5(uuid.NAMESPACE_DNS, name + address))
-                if self.is_known_device(device_id, address, name, device_uuid):
-                    nearby_devices.append({
-                        'id': device_id,
-                        'name': name,
-                        'address': address
-                    })
-        return nearby_devices
