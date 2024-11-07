@@ -26,6 +26,9 @@ import dbus.service
 import uuid
 from pathlib import Path
 import datetime
+import subprocess
+import os
+import signal
 
 try:
     from gi.repository import GLib
@@ -47,6 +50,35 @@ AGENT_MANAGER_IFACE = 'org.bluez.AgentManager1'
 
 LOGGER = getLogger(__name__)
 
+PID_FILE = "/tmp/bluetoothd_program.pid"
+
+# the plugin a2dp seems to "take over" device audio, so we take over the bluetoothd
+# to disable this from happening.  
+def restart_bluetooth_without_a2dp():
+    stop_bluetoothd_if_running()
+
+    # Stop the Bluetooth service
+    subprocess.run([ "systemctl", "stop", "bluetooth"], check=True)
+    
+    # Start bluetoothd with the -P a2dp option to disable the A2DP plugin
+    bluetoothd_process = subprocess.Popen(["bluetoothd", "-P", "a2dp"])
+    with open(PID_FILE, "w") as f:
+        f.write(str(bluetoothd_process.pid))
+    time.sleep(5)
+
+def stop_bluetoothd_if_running():
+    # Check if the PID file exists
+    if os.path.exists(PID_FILE):
+        # Read the PID and try to terminate the process
+        with open(PID_FILE, "r") as f:
+            pid = int(f.read().strip())
+            try:
+                os.kill(pid, signal.SIGTERM)  # Try to terminate gracefully
+                os.remove(PID_FILE)  # Clean up PID file
+            except ProcessLookupError:
+                # Process doesn't exist, remove stale PID file
+                os.remove(PID_FILE)
+
 class bluetooth(Sensor, Reconfigurable):
     MODEL: ClassVar[Model] = Model(ModelFamily("mcvella", "presence"), "bluetooth")
     
@@ -61,6 +93,7 @@ class bluetooth(Sensor, Reconfigurable):
     # Constructor
     @classmethod
     def new(cls, config: ComponentConfig, dependencies: Mapping[ResourceName, ResourceBase]) -> Self:
+        restart_bluetooth_without_a2dp()
         my_class = cls(config.name)
         my_class.reconfigure(config, dependencies)
         return my_class
@@ -77,7 +110,7 @@ class bluetooth(Sensor, Reconfigurable):
             self.manager.stop()
 
         self.advertisement_name = config.attributes.fields["advertisement_name"].string_value or "Viam Presence"
-        self.pairing_accept_timeout = int(config.attributes.fields["pairing_accept_timeout"].number_value) or 30
+        self.pairing_accept_timeout = int(config.attributes.fields["pairing_accept_timeout"].number_value) or 60
 
         try:
             asyncio.ensure_future(self.start_btmanager())
@@ -95,10 +128,6 @@ class bluetooth(Sensor, Reconfigurable):
     async def start_btmanager(self):
         self.manager = BluetoothManager(auto_accept=False, custom_name=self.advertisement_name, pairing_accept_timeout=self.pairing_accept_timeout)
         self.bus = dbus.SystemBus()
-        self.bus.add_signal_receiver(
-            self.manager.device_found,
-            dbus_interface = DBUS_OM_IFACE,
-            signal_name = "InterfacesAdded")
         await self.manager.start()
 
     async def get_readings(
@@ -107,7 +136,7 @@ class bluetooth(Sensor, Reconfigurable):
         ret = { 
             "present_devices": self.manager.present_devices,
             "known_devices": self.manager.paired_devices,
-            "pairing_requests": self.manager.get_pairing_requests()
+            "pairing_requests": self.manager.current_pairing_requests()
         }
         return ret
 
@@ -231,7 +260,7 @@ class Agent(dbus.service.Object):
             LOGGER.error("BluetoothManager reference not set in Agent")
 
 class BluetoothManager:
-    def __init__(self, auto_accept=False, custom_name="Viam Presence", pairing_accept_timeout=30):
+    def __init__(self, auto_accept=False, custom_name="Viam Presence", pairing_accept_timeout=60):
         dbus.mainloop.glib.DBusGMainLoop(set_as_default=True)
         self.bus = dbus.SystemBus()
         
@@ -249,6 +278,7 @@ class BluetoothManager:
 
         self.paired_devices = {}
         self.present_devices = {}
+        # we could make this configurable but it should be stable here
         self.db_conn = sqlite3.connect( str(Path.home()) + '/.viam/paired_devices.db')        
         self.create_db_table()
         self.advertisement = None
@@ -258,6 +288,23 @@ class BluetoothManager:
         self.custom_name = custom_name
         self.pairing_accept_timeout = pairing_accept_timeout
 
+        self.bus.add_signal_receiver(
+                    self.properties_changed,
+                    dbus_interface="org.freedesktop.DBus.Properties",
+                    signal_name="PropertiesChanged",
+                    path_keyword="path"
+                )
+        
+    def properties_changed(self, interface, changed, invalidated, path):
+        if interface != DEVICE_IFACE:
+            return
+        if "Connected" in changed:            
+            for i, request in enumerate(self.agent.pairing_requests):
+                if path == request["device"]:
+                    LOGGER.info("PAIRING")
+                    return
+            self.update_present_device(path)
+            
     def create_db_table(self):
         cursor = self.db_conn.cursor()
         cursor.execute('''
@@ -311,12 +358,12 @@ class BluetoothManager:
             LOGGER.warning("No advertisement running")
 
     def register_ad_cb(self):
-        LOGGER.info("Advertisement registered")
+        LOGGER.debug("Advertisement registered")
 
     def register_ad_error_cb(self, error):
         LOGGER.error(f"Failed to register advertisement: {error}")
 
-    def get_pairing_requests(self):
+    def current_pairing_requests(self):
         if not self.agent or not isinstance(self.agent.pairing_requests, list):
             return []
         
@@ -384,6 +431,26 @@ class BluetoothManager:
                 LOGGER.warning(f"Known device not found: {device}")
         else:
             LOGGER.error("Agent not initialized")    
+
+    def update_present_device(self, device_path):
+        device = dbus.Interface(self.bus.get_object(BLUEZ_SERVICE_NAME, device_path), DBUS_PROP_IFACE)
+        try:
+            address = device.Get(DEVICE_IFACE, "Address")
+            name = device.Get(DEVICE_IFACE, "Name")
+        except dbus.exceptions.DBusException:
+            LOGGER.error(f"Unable to get device properties for {device_path}")
+            return
+        
+        uuids = device.Get(DEVICE_IFACE, "UUIDs")
+        device_uuid = uuids[0] if uuids else ""
+        device_id = str(uuid.uuid5(uuid.NAMESPACE_DNS, name + address))
+
+        self.present_devices[device_id] = {
+            'address': address,
+            'name': name,
+            'uuid': device_uuid,
+            'when': time.time()
+        }       
 
     def add_paired_device(self, device_path):
         device = dbus.Interface(self.bus.get_object(BLUEZ_SERVICE_NAME, device_path), DBUS_PROP_IFACE)
@@ -501,7 +568,6 @@ class BluetoothManager:
 
     def check_for_devices(self):
         objects = self.om.GetManagedObjects()
-        active_devices = set()
         for path, interfaces in objects.items():
             if DEVICE_IFACE not in interfaces:
                 continue
@@ -509,37 +575,24 @@ class BluetoothManager:
             if not properties:
                 continue
             address = properties["Address"]
-            present = self.device_found(address, properties)
-            if present:
-                active_devices.add(address)
+            name = properties.get("Name", "<unknown>")
+            uuids = properties.get("UUIDs", [])
+            device_uuid = uuids[0] if uuids else ""
+            device_id = str(uuid.uuid5(uuid.NAMESPACE_DNS, name + address))
+            if self.is_known_device(device_id, address, name, device_uuid):
+                if not self.is_device_present(address):
+                    LOGGER.debug(f"Attempting to automatically connect to known device: {name} ({address})")
+                    self.auto_connect_device(address)
 
+        # update present device list, removing devices not seen recently
         updated_present_devices = {}
         # Check for devices that are no longer present
         for device_id, device_info in list(self.paired_devices.items()):
-            if device_info['address'] not in active_devices:
-                LOGGER.debug(f"Previously paired device no longer detected: {device_info['name']} ({device_info['address']})")
-            else:
-                updated_present_devices[device_id] = self.paired_devices[device_id]
+            if device_id in self.present_devices:
+                # TODO - make this interval adjustable
+                if time.time() - self.present_devices[device_id]["when"] < 15:
+                    updated_present_devices[device_id] = self.present_devices[device_id]
         self.present_devices = updated_present_devices
-
-    def device_found(self, address, properties):
-        name = properties.get("Name", "<unknown>")
-        uuids = properties.get("UUIDs", [])
-        device_uuid = uuids[0] if uuids else ""
-        device_id = str(uuid.uuid5(uuid.NAMESPACE_DNS, name + address))
-
-        LOGGER.debug(f"Device found during scan: {name} ({address})")
-
-        if self.is_known_device(device_id, address, name, device_uuid):
-            if not self.is_device_present(address):
-                LOGGER.debug(f"Attempting to automatically connect to known device: {name} ({address})")
-                self.auto_connect_device(address)
-            else:
-                LOGGER.debug(f"Recognized and present paired device: {name} ({address})")
-                return True
-        else:
-            LOGGER.debug(f"Unknown device detected: {name} ({address})")
-        return False
 
     def auto_connect_device(self, address):
         try:
@@ -552,15 +605,6 @@ class BluetoothManager:
                     connect_method = dbus.Interface(self.bus.get_object(BLUEZ_SERVICE_NAME, device_path), DEVICE_IFACE)
                     connect_method.Connect()
                     LOGGER.info(f"Successfully initiated connection to device: {address}")
-
-                    # Wait for the connection to establish
-                    for _ in range(10):  # Try for up to 5 seconds (10 * 0.5 seconds)
-                        time.sleep(0.5)
-                        props = device.GetAll(DEVICE_IFACE)
-                        if props.get("Connected", False):
-                            LOGGER.info(f"Device {address} is now connected")
-                            return True
-                    LOGGER.warning(f"Connection initiated but device {address} did not connect within timeout")
                 else:
                     LOGGER.debug(f"Device {address} is already connected")
                     return True

@@ -63,3 +63,14 @@ _For example:_
 ## Troubleshooting
 
 _Add troubleshooting notes here._
+
+
+Audio locking
+
+/lib/systemd/system/bluetooth.service or /etc/systemd/system/dbus-org.bluez.service
+edit /lib/systemd/system/bluetooth.service.d/nv-bluetooth-service.conf
+
+ExecStart=/usr/lib/bluetooth/bluetoothd -P a2dp
+
+sudo systemctl daemon-reload
+sudo systemctl restart bluetooth
