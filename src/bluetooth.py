@@ -53,30 +53,27 @@ LOGGER = getLogger(__name__)
 PID_FILE = "/tmp/bluetoothd_program.pid"
 
 # the plugin a2dp seems to "take over" device audio, so we take over the bluetoothd
-# to disable this from happening.  
+# to disable plugin, preventing this from happening.  
 def restart_bluetooth_without_a2dp():
     stop_bluetoothd_if_running()
 
     # Stop the Bluetooth service
     subprocess.run([ "systemctl", "stop", "bluetooth"], check=True)
     
-    # Start bluetoothd with the -P a2dp option to disable the A2DP plugin
     bluetoothd_process = subprocess.Popen(["bluetoothd", "-P", "a2dp"])
     with open(PID_FILE, "w") as f:
         f.write(str(bluetoothd_process.pid))
     time.sleep(5)
 
 def stop_bluetoothd_if_running():
-    # Check if the PID file exists
     if os.path.exists(PID_FILE):
-        # Read the PID and try to terminate the process
         with open(PID_FILE, "r") as f:
             pid = int(f.read().strip())
             try:
-                os.kill(pid, signal.SIGTERM)  # Try to terminate gracefully
-                os.remove(PID_FILE)  # Clean up PID file
+                os.kill(pid, signal.SIGTERM)  # try to terminate gracefully
+                os.remove(PID_FILE) 
             except ProcessLookupError:
-                # Process doesn't exist, remove stale PID file
+                # process doesn't exist, remove stale PID file
                 os.remove(PID_FILE)
 
 class bluetooth(Sensor, Reconfigurable):
@@ -89,6 +86,7 @@ class bluetooth(Sensor, Reconfigurable):
     manager = None
     bus = None
     pairing_accept_timeout = int
+    device_present_linger = int
 
     # Constructor
     @classmethod
@@ -111,7 +109,7 @@ class bluetooth(Sensor, Reconfigurable):
 
         self.advertisement_name = config.attributes.fields["advertisement_name"].string_value or "Viam Presence"
         self.pairing_accept_timeout = int(config.attributes.fields["pairing_accept_timeout"].number_value) or 60
-
+        self.device_present_linger = int(config.attributes.fields["device_present_linger"].number_value) or 30
         try:
             asyncio.ensure_future(self.start_btmanager())
         except Exception as e:
@@ -126,7 +124,8 @@ class bluetooth(Sensor, Reconfigurable):
         return await super().close()
     
     async def start_btmanager(self):
-        self.manager = BluetoothManager(auto_accept=False, custom_name=self.advertisement_name, pairing_accept_timeout=self.pairing_accept_timeout)
+        self.manager = BluetoothManager(auto_accept=False, custom_name=self.advertisement_name,
+                                        pairing_accept_timeout=self.pairing_accept_timeout, device_present_linger=self.device_present_linger)
         self.bus = dbus.SystemBus()
         await self.manager.start()
 
@@ -260,7 +259,7 @@ class Agent(dbus.service.Object):
             LOGGER.error("BluetoothManager reference not set in Agent")
 
 class BluetoothManager:
-    def __init__(self, auto_accept=False, custom_name="Viam Presence", pairing_accept_timeout=60):
+    def __init__(self, auto_accept=False, custom_name="Viam Presence", pairing_accept_timeout=60, device_present_linger=30):
         dbus.mainloop.glib.DBusGMainLoop(set_as_default=True)
         self.bus = dbus.SystemBus()
         
@@ -287,6 +286,7 @@ class BluetoothManager:
         self.discovery_active = False
         self.custom_name = custom_name
         self.pairing_accept_timeout = pairing_accept_timeout
+        self.device_present_linger = device_present_linger
 
         self.bus.add_signal_receiver(
                     self.properties_changed,
@@ -589,8 +589,7 @@ class BluetoothManager:
         # Check for devices that are no longer present
         for device_id, device_info in list(self.paired_devices.items()):
             if device_id in self.present_devices:
-                # TODO - make this interval adjustable
-                if time.time() - self.present_devices[device_id]["when"] < 15:
+                if time.time() - self.present_devices[device_id]["when"] < self.device_present_linger:
                     updated_present_devices[device_id] = self.present_devices[device_id]
         self.present_devices = updated_present_devices
 
@@ -649,9 +648,11 @@ class BluetoothManager:
             LOGGER.debug(f"Device {name} ({address}) found in paired_devices by ID")
             return True
     
+        # update device info if it changed
         for stored_id, stored_info in self.paired_devices.items():
+            # note that we have matching by name commented out as it would likely be too insecure
             if (stored_info['address'] == address or 
-                (name != "<unknown>" and stored_info['name'] == name) or 
+            #    (name != "<unknown>" and stored_info['name'] == name) or 
                 (device_uuid and stored_info['uuid'] == device_uuid)):
                 LOGGER.debug(f"Device {name} ({address}) matched with stored device {stored_info['name']} ({stored_info['address']})")
                 updated_name = name if name != "<unknown>" else f"Unknown Device ({address[-6:]})"
