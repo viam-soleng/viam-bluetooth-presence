@@ -164,3 +164,4 @@ cython_debug/
 viam-env
 .installed
 paired_devices.db
+module.tar.gz

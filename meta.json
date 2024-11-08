@@ -1,0 +1,14 @@
+{
+  "$schema": "https://dl.viam.dev/module.schema.json",
+  "module_id": "mcvella:bluetooth-presence",
+  "visibility": "public",
+  "url": "https://github.com/mcvella/viam-bluetooth-presence",
+  "description": "A Viam module for linux that advertises on BLE, allowing devices to pair and sensing when they are in range.",
+  "models": [
+    {
+      "api": "rdk:component:sensor",
+      "model": "mcvella:presence:bluetooth"
+    }
+  ],
+  "entrypoint": "run.sh"
+}
