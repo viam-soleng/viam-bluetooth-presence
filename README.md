@@ -119,6 +119,7 @@ The following are attributes to be passed with *accept_pairing_request*:
 | Key | Type | Inclusion | Description |
 | ---- | ---- | --------- | ----------- |
 | `device` | string | **Required** |  The device path seen as 'device' in an existing pairing request. |
+| `label` | string | Optional |  If label is passed, it will be used as the unique ID in known_devices and present_devices. If not specified, a unique UUID will be generated. |
 
 Example:
 

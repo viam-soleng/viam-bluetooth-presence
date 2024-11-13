@@ -149,9 +149,11 @@ class bluetooth(Sensor, Reconfigurable):
         result = {}
         if 'command' in command:
             if command['command'] == 'accept_pairing_request':
-                self.manager.accept_pairing_request(command["device"])
+                paired = self.manager.accept_pairing_request(command["device"], command["label"])
+                return { "paired": paired }
             if command['command'] == 'forget_device':
-                self.manager.forget_device(command["device"])  
+                forgot = self.manager.forget_device(command["device"])  
+                return { "forgot": forgot }
 class Advertisement(dbus.service.Object):
     PATH_BASE = '/org/bluez/example/advertisement'
 
@@ -406,19 +408,21 @@ class BluetoothManager:
         LOGGER.info(f"Removed {removed_count} paired devices")
         return removed_count
 
-    def accept_pairing_request(self, device):
+    def accept_pairing_request(self, device, label):
         if self.agent:
             paired = False
             for i, request in enumerate(self.agent.pairing_requests):
                 if request["device"] == device:
                     del self.agent.pairing_requests[i]
-                    self.add_paired_device(device)
+                    self.add_paired_device(device, label)
                     self.remove_all_physical_pairings()
                     paired = True
             if not paired:
                 LOGGER.warning(f"No pairing request found for device: {device}")
+            return paired
         else:
             LOGGER.error("Agent not initialized")
+            return False
 
     def forget_device(self, device):
         if self.agent:
@@ -427,10 +431,13 @@ class BluetoothManager:
                 self.remove_device_from_db(device)
                 del self.paired_devices[device]
                 LOGGER.info(f"Known device forgotten: {device}")
+                forgot = True
             else:
                 LOGGER.warning(f"Known device not found: {device}")
+            return forgot
         else:
             LOGGER.error("Agent not initialized")    
+            return False
 
     def update_present_device(self, device_path):
         device = dbus.Interface(self.bus.get_object(BLUEZ_SERVICE_NAME, device_path), DBUS_PROP_IFACE)
@@ -445,6 +452,11 @@ class BluetoothManager:
         device_uuid = uuids[0] if uuids else ""
         device_id = str(uuid.uuid5(uuid.NAMESPACE_DNS, name + address))
 
+        # device ID can be user selected, try to match on address
+        for stored_id, stored_info in self.paired_devices.items():
+            if address == stored_info["address"]:
+                device_id = stored_id
+
         self.present_devices[device_id] = {
             'address': address,
             'name': name,
@@ -452,7 +464,7 @@ class BluetoothManager:
             'when': time.time()
         }       
 
-    def add_paired_device(self, device_path):
+    def add_paired_device(self, device_path, label):
         device = dbus.Interface(self.bus.get_object(BLUEZ_SERVICE_NAME, device_path), DBUS_PROP_IFACE)
         try:
             address = device.Get(DEVICE_IFACE, "Address")
@@ -463,7 +475,7 @@ class BluetoothManager:
 
         uuids = device.Get(DEVICE_IFACE, "UUIDs")
         device_uuid = uuids[0] if uuids else ""
-        device_id = str(uuid.uuid5(uuid.NAMESPACE_DNS, name + address))
+        device_id = label or str(uuid.uuid5(uuid.NAMESPACE_DNS, name + address))
 
         self.paired_devices[device_id] = {
             'address': address,
@@ -656,12 +668,12 @@ class BluetoothManager:
                 (device_uuid and stored_info['uuid'] == device_uuid)):
                 LOGGER.debug(f"Device {name} ({address}) matched with stored device {stored_info['name']} ({stored_info['address']})")
                 updated_name = name if name != "<unknown>" else f"Unknown Device ({address[-6:]})"
-                self.paired_devices[device_id] = {
+                self.paired_devices[stored_id] = {
                     'address': address,
                     'name': updated_name,
                     'uuid': device_uuid
                 }
-                self.update_device_in_db(device_id, address, updated_name, device_uuid)
+                self.update_device_in_db(stored_id, address, updated_name, device_uuid)
                 return True
     
         LOGGER.debug(f"Device {name} ({address}) is not a known device")
