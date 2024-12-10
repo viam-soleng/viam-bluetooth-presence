@@ -52,6 +52,7 @@ if [ -f .installed ]
 
     $base_command
     
+    apt install python3.10-venv
     python3 -m venv viam-env
     source viam-env/bin/activate
     apt install build-essential libdbus-glib-1-dev libgirepository1.0-dev libcairo2-dev libxt-dev libgirepository1.0-dev -y
