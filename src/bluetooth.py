@@ -149,7 +149,10 @@ class bluetooth(Sensor, Reconfigurable):
         result = {}
         if 'command' in command:
             if command['command'] == 'accept_pairing_request':
-                paired = self.manager.accept_pairing_request(command["device"], command["label"])
+                label = ""
+                if "label" in command:
+                    label = command["label"]
+                paired = self.manager.accept_pairing_request(command["device"], label)
                 return { "paired": paired }
             if command['command'] == 'forget_device':
                 forgot = self.manager.forget_device(command["device"])  
