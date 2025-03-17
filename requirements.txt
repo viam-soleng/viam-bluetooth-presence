@@ -1,4 +1,4 @@
 viam-sdk~=0.41.1
 dbus-python~=1.2.16
-PyGObject
+PyGObject==3.42.1
 pycairo
