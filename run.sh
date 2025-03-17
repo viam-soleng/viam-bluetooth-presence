@@ -4,27 +4,27 @@ cd "$(dirname "$0")"
 
 # Function to compare version numbers
 version_compare() {
-  if [[ $1 == $2 ]] 
+  if [[ $1 == $2 ]]
   then
       return 0
   fi
   local IFS=.
   local i ver1=($1) ver2=($2)
-  for (( i=${#ver1[@]}; i<${#ver2[@]}; i++ )) 
+  for ((i=${#ver1[@]}; i<${#ver2[@]}; i++)) 
   do
       ver1[i]=0
   done
-  for (( i=0; i<${#ver1[@]}; i++ ))
+  for ((i=0; i<${#ver1[@]}; i++))
   do
-      if [[ -z ${ver2[i]} ]] 
+      if [[ -z ${ver2[i]} ]]
       then
           ver2[i]=0
       fi
-      if ((10#${ver1[i]} > 10#${ver2[i]})) 
+      if ((10#${ver1[i]} > 10#${ver2[i]}))
       then
           return 1
       fi
-      if ((10#${ver1[i]} < 10#${ver2[i]})) 
+      if ((10#${ver1[i]} < 10#${ver2[i]}))
       then
           return 2
       fi
@@ -32,7 +32,8 @@ version_compare() {
   return 0
 }
 
-if [ -f .installed ]; then
+if [ -f .installed ];
+then
     source viam-env/bin/activate
 else
     # Update and install required apt packages
@@ -53,7 +54,8 @@ else
       cmake
 
     # Create symlink so that pkg-config finds "girepository-2.0.pc"
-    if [ ! -f /usr/lib/aarch64-linux-gnu/pkgconfig/girepository-2.0.pc ]; then
+    if [ ! -f /usr/lib/aarch64-linux-gnu/pkgconfig/girepository-2.0.pc ]
+    then
         ln -s /usr/lib/aarch64-linux-gnu/pkgconfig/gobject-introspection-1.0.pc \
               /usr/lib/aarch64-linux-gnu/pkgconfig/girepository-2.0.pc
     fi
@@ -66,6 +68,7 @@ else
     pip_version=$(python3 -m pip --version | awk '{print $2}')
     echo "Detected pip version: $pip_version"
     base_command="python3 -m pip install --user virtualenv"
+    # Check if pip version is 23.0 or higher
     if version_compare "$pip_version" "23.0" 
     then
         if [[ $? -eq 1 ]] || [[ $? -eq 0 ]]
