@@ -10,7 +10,7 @@ version_compare() {
   fi
   local IFS=.
   local i ver1=($1) ver2=($2)
-  for ((i=${#ver1[@]}; i<${#ver2[@]}; i++)) 
+  for ((i=${#ver1[@]}; i<${#ver2[@]}; i++))
   do
       ver1[i]=0
   done
@@ -32,7 +32,7 @@ version_compare() {
   return 0
 }
 
-if [ -f .installed ];
+if [ -f .installed ]
 then
     source viam-env/bin/activate
 else
