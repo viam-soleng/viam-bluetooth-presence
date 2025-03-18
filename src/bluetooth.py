@@ -67,10 +67,11 @@ def restart_bluetooth_without_a2dp():
         # Start the GPIO setting in the background to keep it active
         subprocess.Popen(["gpioset", "--mode=signal", gpio_pin + "=1"], 
                          stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        LOGGER.info("Enabled onboard Bluetooth via GPIO")
         # Give hardware a moment to initialize
         time.sleep(2)
     except Exception as e:
-        LOGGER.debug(f"Could not enable onboard Bluetooth: {e}")
+        LOGGER.debug(f"Could not enable onboard Bluetooth. USB adapter may be required: {e}")
     
     bluetoothd_process = subprocess.Popen(["bluetoothd", "-P", "a2dp"])
     with open(PID_FILE, "w") as f:
