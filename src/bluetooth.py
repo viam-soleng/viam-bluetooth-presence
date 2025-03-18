@@ -280,48 +280,31 @@ class BluetoothManager:
         dbus.mainloop.glib.DBusGMainLoop(set_as_default=True)
         self.bus = dbus.SystemBus()
         
-        # Add retry logic for adapter detection
-        retry_count = 0
-        max_retries = 3
+        # Explicitly enable the Bluetooth hardware first
+        try:
+            # Activate GPIO before even attempting to find adapter
+            gpio_pin = subprocess.check_output(["gpiofind", "PA.04"]).decode().strip()
+            subprocess.run(["gpioset", "--mode=signal", f"{gpio_pin}=1"], check=True)
+            LOGGER.info(f"Enabled onboard Bluetooth via GPIO {gpio_pin}")
+            
+            # Give the system time to initialize hardware
+            LOGGER.info("Waiting for Bluetooth adapter to initialize...")
+            time.sleep(3)
+        except Exception as e:
+            LOGGER.error(f"Error enabling Bluetooth hardware: {e}")
         
-        while retry_count < max_retries:
-            try:
-                self.om = dbus.Interface(self.bus.get_object(BLUEZ_SERVICE_NAME, "/"), DBUS_OM_IFACE)
-                self.adapter_path = self.find_adapter()
-                
-                if not self.adapter_path and retry_count < max_retries - 1:
-                    # Try to enable onboard Bluetooth and retry
-                    try:
-                        # Find the GPIO pin name and set it
-                        gpio_pin = subprocess.check_output(["gpiofind", "PA.04"]).decode().strip()
-                        # Start the GPIO setting in the background
-                        subprocess.Popen(["gpioset", "--mode=signal", f"{gpio_pin}=1"], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-                        LOGGER.info(f"Enabled onboard Bluetooth via GPIO {gpio_pin} (retry {retry_count+1})")
-                        # Give hardware time to initialize
-                        time.sleep(3)
-                        subprocess.run(["systemctl", "restart", "bluetooth"], check=False)
-                        time.sleep(1)
-                    except Exception as e:
-                        LOGGER.debug(f"Error enabling Bluetooth in retry {retry_count}: {e}")
-                    retry_count += 1
-                    continue
-                
-                if self.adapter_path:
-                    self.adapter = dbus.Interface(self.bus.get_object(BLUEZ_SERVICE_NAME, self.adapter_path), ADAPTER_IFACE)
-                    self.adapter_props = dbus.Interface(self.bus.get_object(BLUEZ_SERVICE_NAME, self.adapter_path), DBUS_PROP_IFACE)
-                    self.agent_manager = dbus.Interface(self.bus.get_object(BLUEZ_SERVICE_NAME, "/org/bluez"), AGENT_MANAGER_IFACE)
-                    self.ad_manager = dbus.Interface(self.bus.get_object(BLUEZ_SERVICE_NAME, self.adapter_path), LE_ADVERTISING_MANAGER_IFACE)
-                    LOGGER.info("Bluetooth adapter found successfully")
-                    break
-                else:
-                    retry_count += 1
-            except Exception as e:
-                LOGGER.debug(f"Retry {retry_count}: Error initializing Bluetooth: {e}")
-                retry_count += 1
-                time.sleep(1)
+        # Now try to find the adapter
+        self.om = dbus.Interface(self.bus.get_object(BLUEZ_SERVICE_NAME, "/"), DBUS_OM_IFACE)
+        self.adapter_path = self.find_adapter()
         
-        if not self.adapter_path:
-            LOGGER.error("No Bluetooth adapter found after retries")
+        if self.adapter_path:
+            self.adapter = dbus.Interface(self.bus.get_object(BLUEZ_SERVICE_NAME, self.adapter_path), ADAPTER_IFACE)
+            self.adapter_props = dbus.Interface(self.bus.get_object(BLUEZ_SERVICE_NAME, self.adapter_path), DBUS_PROP_IFACE)
+            self.agent_manager = dbus.Interface(self.bus.get_object(BLUEZ_SERVICE_NAME, "/org/bluez"), AGENT_MANAGER_IFACE)
+            self.ad_manager = dbus.Interface(self.bus.get_object(BLUEZ_SERVICE_NAME, self.adapter_path), LE_ADVERTISING_MANAGER_IFACE)
+            LOGGER.info("Bluetooth adapter found successfully")
+        else:
+            LOGGER.error("No Bluetooth adapter found")
             raise RuntimeError("No Bluetooth adapter found")
 
         self.paired_devices = {}
