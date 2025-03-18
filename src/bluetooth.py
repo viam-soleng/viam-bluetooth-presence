@@ -63,9 +63,17 @@ def restart_bluetooth_without_a2dp():
     # Enabling onboard Bluetooth
     try:
         # Find the GPIO pin name and set it
-        gpio_pin = subprocess.check_output(["gpiofind", "PA.04"]).decode().strip()
+        # gpio_pin = subprocess.check_output(["gpiofind", "PA.04"]).decode().strip()
         # Start the GPIO setting in the background to keep it active
-        subprocess.run(["gpioset", "--mode=signal", gpio_value.split()[0], f"{gpio_value.split()[1]}=1"], check=True)
+        # subprocess.run(["gpioset", "--mode=signal", gpio_value.split()[0], f"{gpio_value.split()[1]}=1"], check=True)
+        
+        command = "sudo gpioset --mode=signal $(gpiofind PA.04)=1"
+        LOGGER.info(f"Executing GPIO command: {command}")
+        
+        # Run the exact command that works in the shell
+        subprocess.run(command, shell=True, check=True)
+        LOGGER.info("Successfully enabled onboard Bluetooth via GPIO")
+
         LOGGER.info("Enabled onboard Bluetooth via GPIO")
         # Give hardware a moment to initialize
         time.sleep(3)
@@ -280,11 +288,17 @@ class BluetoothManager:
         dbus.mainloop.glib.DBusGMainLoop(set_as_default=True)
         self.bus = dbus.SystemBus()
         
-        # Explicitly enable the Bluetooth hardware first
         try:
             # Activate GPIO before even attempting to find adapter
-            gpio_pin = subprocess.check_output(["gpiofind", "PA.04"]).decode().strip()
-            subprocess.run(["gpioset", "--mode=signal", gpio_value.split()[0], f"{gpio_value.split()[1]}=1"], check=True)
+            # gpio_pin = subprocess.check_output(["gpiofind", "PA.04"]).decode().strip()
+            # subprocess.run(["gpioset", "--mode=signal", gpio_value.split()[0], f"{gpio_value.split()[1]}=1"], check=True)
+            
+            command = "sudo gpioset --mode=signal $(gpiofind PA.04)=1"
+            LOGGER.info(f"Executing GPIO command: {command}")
+
+            # Run the exact command that works in the shell
+            subprocess.run(command, shell=True, check=True)
+            LOGGER.info("Successfully enabled onboard Bluetooth via GPIO")
             LOGGER.info(f"Enabled onboard Bluetooth via GPIO {gpio_pin}")
             
             # Give the system time to initialize hardware
