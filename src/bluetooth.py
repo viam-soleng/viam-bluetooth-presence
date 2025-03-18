@@ -319,7 +319,7 @@ class BluetoothManager:
                 time.sleep(1)
         
         if not self.adapter_path:
-            LOGGER.error("No Bluetooth adapter found after retries")
+            LOGGER.error("No Bluetooth adapter found")
             raise RuntimeError("No Bluetooth adapter found")
 
         self.paired_devices = {}
