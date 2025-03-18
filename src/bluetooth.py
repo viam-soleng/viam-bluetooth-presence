@@ -58,7 +58,19 @@ def restart_bluetooth_without_a2dp():
     stop_bluetoothd_if_running()
 
     # Stop the Bluetooth service
-    subprocess.run([ "systemctl", "stop", "bluetooth"], check=True)
+    subprocess.run(["systemctl", "stop", "bluetooth"], check=True)
+
+    # Enabling onboard Bluetooth
+    try:
+        # Find the GPIO pin name and set it
+        gpio_pin = subprocess.check_output(["gpiofind", "PA.04"]).decode().strip()
+        # Start the GPIO setting in the background to keep it active
+        subprocess.Popen(["gpioset", "--mode=signal", gpio_pin + "=1"], 
+                         stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        # Give hardware a moment to initialize
+        time.sleep(2)
+    except Exception as e:
+        LOGGER.debug(f"Could not enable onboard Bluetooth: {e}")
     
     bluetoothd_process = subprocess.Popen(["bluetoothd", "-P", "a2dp"])
     with open(PID_FILE, "w") as f:
@@ -268,22 +280,52 @@ class BluetoothManager:
         dbus.mainloop.glib.DBusGMainLoop(set_as_default=True)
         self.bus = dbus.SystemBus()
         
-        self.om = dbus.Interface(self.bus.get_object(BLUEZ_SERVICE_NAME, "/"), DBUS_OM_IFACE)
-        self.adapter_path = self.find_adapter()
+        # Add retry logic for adapter detection
+        retry_count = 0
+        max_retries = 3
         
-        if self.adapter_path:
-            self.adapter = dbus.Interface(self.bus.get_object(BLUEZ_SERVICE_NAME, self.adapter_path), ADAPTER_IFACE)
-            self.adapter_props = dbus.Interface(self.bus.get_object(BLUEZ_SERVICE_NAME, self.adapter_path), DBUS_PROP_IFACE)
-            self.agent_manager = dbus.Interface(self.bus.get_object(BLUEZ_SERVICE_NAME, "/org/bluez"), AGENT_MANAGER_IFACE)
-            self.ad_manager = dbus.Interface(self.bus.get_object(BLUEZ_SERVICE_NAME, self.adapter_path), LE_ADVERTISING_MANAGER_IFACE)
-        else:
-            LOGGER.error("No Bluetooth adapter found")
+        while retry_count < max_retries:
+            try:
+                self.om = dbus.Interface(self.bus.get_object(BLUEZ_SERVICE_NAME, "/"), DBUS_OM_IFACE)
+                self.adapter_path = self.find_adapter()
+                
+                if not self.adapter_path and retry_count < max_retries - 1:
+                    # Try to enable onboard Bluetooth and retry
+                    try:
+                        # Find the GPIO pin name and set it
+                        gpio_pin = subprocess.check_output(["gpiofind", "PA.04"]).decode().strip()
+                        # Start the GPIO setting in the background
+                        subprocess.Popen(["gpioset", "--mode=signal", gpio_pin + "=1"], 
+                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                        time.sleep(2)  # Give hardware time to initialize
+                        subprocess.run(["systemctl", "restart", "bluetooth"], check=False)
+                        time.sleep(1)
+                    except Exception as e:
+                        LOGGER.debug(f"Error enabling Bluetooth in retry {retry_count}: {e}")
+                    retry_count += 1
+                    continue
+                
+                if self.adapter_path:
+                    self.adapter = dbus.Interface(self.bus.get_object(BLUEZ_SERVICE_NAME, self.adapter_path), ADAPTER_IFACE)
+                    self.adapter_props = dbus.Interface(self.bus.get_object(BLUEZ_SERVICE_NAME, self.adapter_path), DBUS_PROP_IFACE)
+                    self.agent_manager = dbus.Interface(self.bus.get_object(BLUEZ_SERVICE_NAME, "/org/bluez"), AGENT_MANAGER_IFACE)
+                    self.ad_manager = dbus.Interface(self.bus.get_object(BLUEZ_SERVICE_NAME, self.adapter_path), LE_ADVERTISING_MANAGER_IFACE)
+                    break
+                else:
+                    retry_count += 1
+            except Exception as e:
+                LOGGER.debug(f"Retry {retry_count}: Error initializing Bluetooth: {e}")
+                retry_count += 1
+                time.sleep(1)
+        
+        if not self.adapter_path:
+            LOGGER.error("No Bluetooth adapter found after retries")
             raise RuntimeError("No Bluetooth adapter found")
 
         self.paired_devices = {}
         self.present_devices = {}
         # we could make this configurable but it should be stable here
-        self.db_conn = sqlite3.connect( str(Path.home()) + '/.viam/paired_devices.db')        
+        self.db_conn = sqlite3.connect(str(Path.home()) + '/.viam/paired_devices.db')        
         self.create_db_table()
         self.advertisement = None
         self.agent = None
