@@ -65,8 +65,7 @@ def restart_bluetooth_without_a2dp():
         # Find the GPIO pin name and set it
         gpio_pin = subprocess.check_output(["gpiofind", "PA.04"]).decode().strip()
         # Start the GPIO setting in the background to keep it active
-        subprocess.Popen(["gpioset", "--mode=signal", f"{gpio_pin}=1"], 
-                        stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        subprocess.Popen(["gpioset", "--mode=signal", f"{gpio_pin}=1"], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         LOGGER.info("Enabled onboard Bluetooth via GPIO")
         # Give hardware a moment to initialize
         time.sleep(3)
@@ -296,8 +295,7 @@ class BluetoothManager:
                         # Find the GPIO pin name and set it
                         gpio_pin = subprocess.check_output(["gpiofind", "PA.04"]).decode().strip()
                         # Start the GPIO setting in the background
-                        subprocess.Popen(["gpioset", "--mode=signal", f"{gpio_pin}=1"], 
-                                        stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                        subprocess.Popen(["gpioset", "--mode=signal", f"{gpio_pin}=1"], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
                         LOGGER.info(f"Enabled onboard Bluetooth via GPIO {gpio_pin} (retry {retry_count+1})")
                         # Give hardware time to initialize
                         time.sleep(3)
