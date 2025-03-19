@@ -151,19 +151,10 @@ class bluetooth(Sensor, Reconfigurable):
     # Constructor
     @classmethod
     def new(cls, config: ComponentConfig, dependencies: Mapping[ResourceName, ResourceBase]) -> Self:
-        LOGGER.info("Creating new bluetooth sensor instance...")
-        try:
-            LOGGER.info("Restarting bluetooth without a2dp...")
-            restart_bluetooth_without_a2dp()
-            LOGGER.info("Bluetooth restart complete, creating class instance...")
-            my_class = cls(config.name)
-            LOGGER.info("Class instance created, reconfiguring...")
-            my_class.reconfigure(config, dependencies)
-            LOGGER.info("Reconfiguration complete")
-            return my_class
-        except Exception as e:
-            LOGGER.error(f"Error in bluetooth.new(): {e}", exc_info=True)
-            raise
+        restart_bluetooth_without_a2dp()
+        my_class = cls(config.name)
+        my_class.reconfigure(config, dependencies)
+        return my_class
 
     # Validates JSON Configuration
     @classmethod
