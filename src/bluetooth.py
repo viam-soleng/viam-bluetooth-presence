@@ -109,7 +109,6 @@ def enable_onboard_bluetooth():
 try:
     LOGGER.info("Attempting to enable onboard Bluetooth...")
     enable_onboard_bluetooth()
-    LOGGER.info("Onboard Bluetooth initialization completed")
 except Exception as e:
     LOGGER.error(f"Error during onboard Bluetooth initialization: {e}")
 
