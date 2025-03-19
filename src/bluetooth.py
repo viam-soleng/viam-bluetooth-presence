@@ -58,27 +58,7 @@ def restart_bluetooth_without_a2dp():
     stop_bluetoothd_if_running()
 
     # Stop the Bluetooth service
-    subprocess.run(["systemctl", "stop", "bluetooth"], check=True)
-
-    # Enabling onboard Bluetooth
-    try:
-        # Find the GPIO pin name and set it
-        # gpio_pin = subprocess.check_output(["gpiofind", "PA.04"]).decode().strip()
-        # Start the GPIO setting in the background to keep it active
-        # subprocess.run(["gpioset", "--mode=signal", gpio_value.split()[0], f"{gpio_value.split()[1]}=1"], check=True)
-        
-        command = "sudo gpioset --mode=signal $(gpiofind PA.04)=1"
-        LOGGER.info(f"Executing GPIO command: {command}")
-        
-        # Run the exact command that works in the shell
-        subprocess.run(command, shell=True, check=True)
-        LOGGER.info("Successfully enabled onboard Bluetooth via GPIO")
-
-        LOGGER.info("Enabled onboard Bluetooth via GPIO")
-        # Give hardware a moment to initialize
-        time.sleep(3)
-    except Exception as e:
-        LOGGER.debug(f"Could not enable onboard Bluetooth. USB adapter may be required: {e}")
+    subprocess.run([ "systemctl", "stop", "bluetooth"], check=True)
     
     bluetoothd_process = subprocess.Popen(["bluetoothd", "-P", "a2dp"])
     with open(PID_FILE, "w") as f:
@@ -177,6 +157,7 @@ class bluetooth(Sensor, Reconfigurable):
             if command['command'] == 'forget_device':
                 forgot = self.manager.forget_device(command["device"])  
                 return { "forgot": forgot }
+
 class Advertisement(dbus.service.Object):
     PATH_BASE = '/org/bluez/example/advertisement'
 
@@ -288,26 +269,6 @@ class BluetoothManager:
         dbus.mainloop.glib.DBusGMainLoop(set_as_default=True)
         self.bus = dbus.SystemBus()
         
-        try:
-            # Activate GPIO before even attempting to find adapter
-            # gpio_pin = subprocess.check_output(["gpiofind", "PA.04"]).decode().strip()
-            # subprocess.run(["gpioset", "--mode=signal", gpio_value.split()[0], f"{gpio_value.split()[1]}=1"], check=True)
-            
-            command = "sudo gpioset --mode=signal $(gpiofind PA.04)=1"
-            LOGGER.info(f"Executing GPIO command: {command}")
-
-            # Run the exact command that works in the shell
-            subprocess.run(command, shell=True, check=True)
-            LOGGER.info("Successfully enabled onboard Bluetooth via GPIO")
-            LOGGER.info(f"Enabled onboard Bluetooth via GPIO {gpio_pin}")
-            
-            # Give the system time to initialize hardware
-            LOGGER.info("Waiting for Bluetooth adapter to initialize...")
-            time.sleep(3)
-        except Exception as e:
-            LOGGER.error(f"Error enabling Bluetooth hardware: {e}")
-        
-        # Now try to find the adapter
         self.om = dbus.Interface(self.bus.get_object(BLUEZ_SERVICE_NAME, "/"), DBUS_OM_IFACE)
         self.adapter_path = self.find_adapter()
         
@@ -316,7 +277,6 @@ class BluetoothManager:
             self.adapter_props = dbus.Interface(self.bus.get_object(BLUEZ_SERVICE_NAME, self.adapter_path), DBUS_PROP_IFACE)
             self.agent_manager = dbus.Interface(self.bus.get_object(BLUEZ_SERVICE_NAME, "/org/bluez"), AGENT_MANAGER_IFACE)
             self.ad_manager = dbus.Interface(self.bus.get_object(BLUEZ_SERVICE_NAME, self.adapter_path), LE_ADVERTISING_MANAGER_IFACE)
-            LOGGER.info("Bluetooth adapter found successfully")
         else:
             LOGGER.error("No Bluetooth adapter found")
             raise RuntimeError("No Bluetooth adapter found")
@@ -324,7 +284,7 @@ class BluetoothManager:
         self.paired_devices = {}
         self.present_devices = {}
         # we could make this configurable but it should be stable here
-        self.db_conn = sqlite3.connect(str(Path.home()) + '/.viam/paired_devices.db')        
+        self.db_conn = sqlite3.connect( str(Path.home()) + '/.viam/paired_devices.db')        
         self.create_db_table()
         self.advertisement = None
         self.agent = None
