@@ -53,7 +53,7 @@ LOGGER = getLogger(__name__)
 PID_FILE = "/tmp/bluetoothd_program.pid"
 
 def enable_onboard_bluetooth():
-     # Check if the gpiofind command is available and can find PA.04
+     # Check if the gpiofind command is available and can find GPIO pin PA.04 on the board
     try:
         find_result = subprocess.run(
             ["gpiofind", "PA.04"], 
@@ -69,9 +69,12 @@ def enable_onboard_bluetooth():
         # If PA.04 exists, then activate it
         LOGGER.info("GPIO pin PA.04 detected (activating), enabling onboard Bluetooth...")
         
+        # Formatting the GPIO line and value
+        gpio_pin = find_result.stdout.strip()
+        
         # Using mode=signal to ensure GPIO state persists
         result = subprocess.run(
-            ["sudo", "gpioset", "--mode=signal", find_result.stdout.strip() + "=1"], 
+            ["sudo", "gpioset", "--mode=signal", gpio_pin.split()[0], f"{gpio_pin.split()[1]}=1"], 
             capture_output=True, 
             text=True,
             check=False
@@ -87,6 +90,9 @@ def enable_onboard_bluetooth():
     except (subprocess.SubprocessError, OSError) as e:
         LOGGER.warning(f"Error attempting to enable onboard Bluetooth: {str(e)}")
         return False
+
+# Activate GPIO for onboard Bluetooth at module load time (before adapter detection)
+enable_onboard_bluetooth()
 
 # the plugin a2dp seems to "take over" device audio, so we take over the bluetoothd
 # to disable plugin, preventing this from happening.  
