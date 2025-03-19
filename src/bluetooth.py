@@ -53,11 +53,25 @@ LOGGER = getLogger(__name__)
 PID_FILE = "/tmp/bluetoothd_program.pid"
 
 def enable_onboard_bluetooth():
-     # Check if the gpiofind command is available and can find GPIO pin PA.04 on the board
     try:
+        # Check if Bluetooth via GPIO pin PA.04 is already enabled (and is currently working)
+        check_bluetooth = subprocess.run(
+            ["hciconfig"], 
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True, 
+            check=False
+        )
+        
+        if "UP RUNNING" in check_bluetooth.stdout:
+            LOGGER.info("Bluetooth is already up and running, skipping GPIO activation now")
+            return True
+
+        # Check if the gpiofind command is available and can find GPIO pin PA.04 on the board
         find_result = subprocess.run(
             ["gpiofind", "PA.04"], 
-            capture_output=True, 
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             text=True, 
             check=False
         )
@@ -72,41 +86,37 @@ def enable_onboard_bluetooth():
         # Formatting the GPIO line and value
         gpio_pin = find_result.stdout.strip()
         
-        # Using mode=signal to ensure GPIO state persists
-        result = subprocess.run(
-            ["sudo", "gpioset", "--mode=signal", gpio_pin.split()[0], f"{gpio_pin.split()[1]}=1"], 
-            capture_output=True, 
-            text=True,
-            check=False
+        cmd = f"sudo gpioset --mode=signal {gpio_pin.split()[0]} {gpio_pin.split()[1]}=1"
+        LOGGER.info(f"Running command: {cmd}")
+        
+        # Run the command
+        subprocess.Popen(
+            cmd,
+            shell=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL
         )
         
-        if result.returncode == 0:
-            LOGGER.info("Successfully enabled onboard Bluetooth via GPIO PA.04")
-            return True
-        else:
-            # If "busy" error, then consider it success since pin is already set
-            if "busy" in result.stderr.lower():
-                LOGGER.info("GPIO pin PA.04 is already active, continuing with initialization")
-                return True
-            else:
-                LOGGER.warning(f"Failed to enable onboard Bluetooth: {result.stderr}")
-                return False
+        # Debug (temporary)
+        LOGGER.info("GPIO pin PA.04 initiated")
+        return True
             
-    except (subprocess.SubprocessError, OSError) as e:
+    except Exception as e:
         LOGGER.warning(f"Error attempting to enable onboard Bluetooth: {str(e)}")
         return False
 
 # Activate GPIO for onboard Bluetooth at module load time (before adapter detection)
-enable_onboard_bluetooth()
+try:
+    LOGGER.info("Attempting to enable onboard Bluetooth...")
+    enable_onboard_bluetooth()
+    LOGGER.info("Onboard Bluetooth initialization completed")
+except Exception as e:
+    LOGGER.error(f"Error during onboard Bluetooth initialization: {e}")
 
 # the plugin a2dp seems to "take over" device audio, so we take over the bluetoothd
 # to disable plugin, preventing this from happening.  
 def restart_bluetooth_without_a2dp():
     stop_bluetoothd_if_running()
-
-    # Attempt to enable the onboard Bluetooth by activating GPIO pin PA.04
-    # Falls back to a USB adapter if it fails (or hardware is incompatible)
-    enable_onboard_bluetooth()
 
     # Stop the Bluetooth service
     subprocess.run([ "systemctl", "stop", "bluetooth"], check=True)
@@ -142,10 +152,19 @@ class bluetooth(Sensor, Reconfigurable):
     # Constructor
     @classmethod
     def new(cls, config: ComponentConfig, dependencies: Mapping[ResourceName, ResourceBase]) -> Self:
-        restart_bluetooth_without_a2dp()
-        my_class = cls(config.name)
-        my_class.reconfigure(config, dependencies)
-        return my_class
+        LOGGER.info("Creating new bluetooth sensor instance...")
+        try:
+            LOGGER.info("Restarting bluetooth without a2dp...")
+            restart_bluetooth_without_a2dp()
+            LOGGER.info("Bluetooth restart complete, creating class instance...")
+            my_class = cls(config.name)
+            LOGGER.info("Class instance created, reconfiguring...")
+            my_class.reconfigure(config, dependencies)
+            LOGGER.info("Reconfiguration complete")
+            return my_class
+        except Exception as e:
+            LOGGER.error(f"Error in bluetooth.new(): {e}", exc_info=True)
+            raise
 
     # Validates JSON Configuration
     @classmethod
