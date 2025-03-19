@@ -84,8 +84,13 @@ def enable_onboard_bluetooth():
             LOGGER.info("Successfully enabled onboard Bluetooth via GPIO PA.04")
             return True
         else:
-            LOGGER.warning(f"Failed to enable onboard Bluetooth: {result.stderr}")
-            return False
+            # If "busy" error, then consider it success since pin is already set
+            if "busy" in result.stderr.lower():
+                LOGGER.info("GPIO pin PA.04 is already active, continuing with initialization")
+                return True
+            else:
+                LOGGER.warning(f"Failed to enable onboard Bluetooth: {result.stderr}")
+                return False
             
     except (subprocess.SubprocessError, OSError) as e:
         LOGGER.warning(f"Error attempting to enable onboard Bluetooth: {str(e)}")
