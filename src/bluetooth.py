@@ -64,7 +64,7 @@ def enable_onboard_bluetooth():
         )
         
         if "UP RUNNING" in check_bluetooth.stdout:
-            LOGGER.info("Bluetooth is already up and running, skipping GPIO activation now")
+            LOGGER.info("Bluetooth is already up and running, skipping GPIO activation")
             return True
 
         # Check if the gpiofind command is available and can find GPIO pin PA.04 on the board
