@@ -52,6 +52,66 @@ LOGGER = getLogger(__name__)
 
 PID_FILE = "/tmp/bluetoothd_program.pid"
 
+def enable_onboard_bluetooth():
+    try:
+        # Check if Bluetooth via GPIO pin PA.04 is already enabled (and is currently working)
+        check_bluetooth = subprocess.run(
+            ["hciconfig"], 
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True, 
+            check=False
+        )
+        
+        if "UP RUNNING" in check_bluetooth.stdout:
+            LOGGER.info("Bluetooth is already up and running, skipping GPIO activation")
+            return True
+
+        # Check if the gpiofind command is available and can find GPIO pin PA.04 on the board
+        find_result = subprocess.run(
+            ["gpiofind", "PA.04"], 
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True, 
+            check=False
+        )
+        
+        if find_result.returncode != 0:
+            LOGGER.info("GPIO pin PA.04 not found, skipping onboard Bluetooth activation")
+            return False
+            
+        # If PA.04 exists, then activate it
+        LOGGER.info("GPIO pin PA.04 detected (activating), enabling onboard Bluetooth...")
+        
+        # Formatting the GPIO line and value
+        gpio_pin = find_result.stdout.strip()
+        
+        cmd = f"sudo gpioset --mode=signal {gpio_pin.split()[0]} {gpio_pin.split()[1]}=1"
+        LOGGER.info(f"Running command: {cmd}")
+        
+        # Run the command
+        subprocess.Popen(
+            cmd,
+            shell=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL
+        )
+        
+        # Debug (temporary)
+        LOGGER.info("GPIO pin PA.04 initiated")
+        return True
+            
+    except Exception as e:
+        LOGGER.warning(f"Error attempting to enable onboard Bluetooth: {str(e)}")
+        return False
+
+# Activate GPIO for onboard Bluetooth at module load time (before adapter detection)
+try:
+    LOGGER.info("Attempting to enable onboard Bluetooth...")
+    enable_onboard_bluetooth()
+except Exception as e:
+    LOGGER.error(f"Error during onboard Bluetooth initialization: {e}")
+
 # the plugin a2dp seems to "take over" device audio, so we take over the bluetoothd
 # to disable plugin, preventing this from happening.  
 def restart_bluetooth_without_a2dp():
@@ -157,6 +217,7 @@ class bluetooth(Sensor, Reconfigurable):
             if command['command'] == 'forget_device':
                 forgot = self.manager.forget_device(command["device"])  
                 return { "forgot": forgot }
+
 class Advertisement(dbus.service.Object):
     PATH_BASE = '/org/bluez/example/advertisement'
 
