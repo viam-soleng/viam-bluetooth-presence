@@ -11,7 +11,7 @@ This model:
 
 A Linux system running bluetoothd.
 
-*Note* that in order to not "take over" audio from paired devices, bluetoothd must be rub without the "a2dp" plugin.
+*Note* that in order to not "take over" audio from paired devices, bluetoothd must be run without the "a2dp" plugin.
 This module will restart the system bluetoothd on start, passing in the "-P a2dp" flag.
 Therefore, it is not recommended that you use this module on a linux system that you are using for other bluetooth functionality.
 
