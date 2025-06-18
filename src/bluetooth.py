@@ -553,20 +553,58 @@ class BluetoothManager:
     async def start(self):
         LOGGER.info("Starting Bluetooth Manager...")
 
+        # Clean up any existing D-Bus resources
+        try:
+            # Stop any existing discovery
+            if self.discovery_active:
+                self.adapter.StopDiscovery()
+                self.discovery_active = False
+                LOGGER.info("Stopped existing discovery")
+
+            # Unregister any existing agent
+            if hasattr(self, 'agent') and self.agent is not None:
+                try:
+                    self.agent_manager.UnregisterAgent(self.agent.get_path())
+                    self.agent.remove_from_connection(self.bus)
+                    self.agent = None
+                    LOGGER.info("Unregistered existing agent")
+                except Exception as e:
+                    LOGGER.info(f"No existing agent to unregister (or error): {e}")
+
+            # Unregister any existing advertisement
+            if self.advertisement:
+                try:
+                    self.ad_manager.UnregisterAdvertisement(self.advertisement.get_path())
+                    self.advertisement = None
+                    LOGGER.info("Unregistered existing advertisement")
+                except Exception as e:
+                    LOGGER.info(f"No existing advertisement to unregister (or error): {e}")
+
+            # Add a small delay to let BlueZ settle
+            await asyncio.sleep(1)
+
+        except Exception as e:
+            LOGGER.warning(f"Error during cleanup: {e}")
+
+        # Now proceed with normal startup
         self.adapter_props.Set(ADAPTER_IFACE, "Powered", dbus.Boolean(True))
         self.adapter_props.Set(ADAPTER_IFACE, "Discoverable", dbus.Boolean(True))
         self.adapter_props.Set(ADAPTER_IFACE, "DiscoverableTimeout", dbus.UInt32(0))
         self.adapter_props.Set(ADAPTER_IFACE, "Pairable", dbus.Boolean(True))
-
-        # Set the custom name for the adapter
         self.adapter_props.Set(ADAPTER_IFACE, "Alias", self.custom_name)
 
         self.start_advertising()
 
-        self.agent = Agent(self.bus, "/test/agent", self.auto_accept)
-        self.agent.manager = self 
-        self.agent_manager.RegisterAgent(self.agent.get_path(), "KeyboardDisplay")
-        self.agent_manager.RequestDefaultAgent(self.agent.get_path())
+        self.agent = Agent(self.bus, "/org/bluez/agent", auto_accept=self.auto_accept)
+        self.agent.manager = self
+        try:
+            self.agent_manager.RegisterAgent(self.agent.get_path(), "KeyboardDisplay")
+            LOGGER.info("Agent registered with KeyboardDisplay")
+            self.agent_manager.RequestDefaultAgent(self.agent.get_path())
+            LOGGER.info("Agent set as default")
+        except Exception as e:
+            LOGGER.error(f"Failed to register agent: {e}")
+            raise RuntimeError("Failed to register Bluetooth agent.")
 
         self.adapter.SetDiscoveryFilter({'Transport': 'le'})
         self.adapter.StartDiscovery()
