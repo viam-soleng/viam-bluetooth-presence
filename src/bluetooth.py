@@ -137,7 +137,7 @@ def stop_bluetoothd_if_running():
                 os.remove(PID_FILE)
 
 class bluetooth(Sensor, Reconfigurable):
-    MODEL: ClassVar[Model] = Model(ModelFamily("mcvella", "presence"), "bluetooth")
+    MODEL: ClassVar[Model] = Model(ModelFamily("viam-soleng", "presence"), "bluetooth")
     
     advertisement_name: str
     advertisement = None
