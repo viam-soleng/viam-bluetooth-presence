@@ -9,7 +9,7 @@ This model:
 
 ## Requirements
 
-A Linux system running `bluetooth.service` with the a2dp plugin disabled, so the module doesn't take over audio from paired devices. JetPack on Jetson Orin disables it by default (`--noplugin=audio,a2dp,avrcp` in `nv-bluetooth-service.conf`). On other systems, add `--noplugin=a2dp` to the bluetoothd `ExecStart` line (see [Notes](#notes)).
+A Linux system running `bluetooth.service`. The module refuses audio profiles (A2DP, AVRCP, headset and hands-free), so a paired phone can't use the machine as a speaker or headset. Because of this, some phones show the machine as "Connecting" even while it detects them.
 
 Don't use this module on a system that needs Bluetooth for anything else. The module confirms every pairing at the Bluetooth level, then unpairs any device whose pairing request isn't accepted before it expires.
 
@@ -101,9 +101,7 @@ Known devices can be removed with the do_command() *forget_device* command.
 A pairing request is initiated when someone asks to pair from their bluetooth enabled device (phone, laptop, tablet etc) by choosing the advertisement name broadcast by this module as selected by the config setting *advertisement_name*.
 A pairing request will expire after *pairing_accept_timeout* seconds, and can be accepted by calling the do_command() *accept_paring_request* command.
 
-*present_devices* is a dictionary of the *known_devices* that are currently detected as being nearby by this module.
-This is tested by attempting to periodically connect to any known devices.
-A present device will be considered not present after last connected to it via bluetooth LE for *device_present_linger* seconds.
+*present_devices* is a dictionary of the *known_devices* that are currently connected to this machine. The module tries to connect to each known device that isn't connected, every 10 seconds. A device stays present for *device_present_linger* seconds after it disconnects.
 
 ### do_command(*dictionary*)
 
@@ -127,7 +125,7 @@ sms.do_command({"command": "accept_pairing_request", "device": "/your/device/pat
 
 #### forget_device
 
-When *forget_device* is passed as the command, a known device is removed from *known_devices* and will not longer appear as present in *present_devices* unless re-paired.
+When *forget_device* is passed as the command, a known device is removed from *known_devices* and its pairing is removed. It will no longer appear in *present_devices* unless it pairs again and is accepted.
 The following are attributes to be passed with *forget_device*:
 
 | Key | Type | Inclusion | Description |
@@ -142,7 +140,7 @@ sms.do_command({"command": "forget_device", "device": "b55a70ba-6830-5b26-a291-c
 
 ## Notes
 
-On JetPack you shouldn't need to modify your bluetoothd configuration. On other systems, it is likely located at:
+You shouldn't need to modify your bluetoothd configuration. If you do, it is likely located at:
 
 /lib/systemd/system/bluetooth.service or /etc/systemd/system/dbus-org.bluez.service
 
