@@ -27,8 +27,6 @@ import uuid
 from pathlib import Path
 import datetime
 import subprocess
-import os
-import signal
 
 try:
     from gi.repository import GLib
@@ -49,8 +47,6 @@ AGENT_IFACE = 'org.bluez.Agent1'
 AGENT_MANAGER_IFACE = 'org.bluez.AgentManager1'
 
 LOGGER = getLogger(__name__)
-
-PID_FILE = "/tmp/bluetoothd_program.pid"
 
 def enable_onboard_bluetooth():
     try:
@@ -112,29 +108,10 @@ try:
 except Exception as e:
     LOGGER.error(f"Error during onboard Bluetooth initialization: {e}")
 
-# the plugin a2dp seems to "take over" device audio, so we take over the bluetoothd
-# to disable plugin, preventing this from happening.  
-def restart_bluetooth_without_a2dp():
-    stop_bluetoothd_if_running()
-
-    # Stop the Bluetooth service
-    subprocess.run([ "systemctl", "stop", "bluetooth"], check=True)
-    
-    bluetoothd_process = subprocess.Popen(["bluetoothd", "-P", "a2dp"])
-    with open(PID_FILE, "w") as f:
-        f.write(str(bluetoothd_process.pid))
-    time.sleep(5)
-
-def stop_bluetoothd_if_running():
-    if os.path.exists(PID_FILE):
-        with open(PID_FILE, "r") as f:
-            pid = int(f.read().strip())
-            try:
-                os.kill(pid, signal.SIGTERM)  # try to terminate gracefully
-                os.remove(PID_FILE) 
-            except ProcessLookupError:
-                # process doesn't exist, remove stale PID file
-                os.remove(PID_FILE)
+# JetPack's bluetooth.service already runs bluetoothd with --noplugin=audio,a2dp,avrcp,
+# so a2dp can't take over device audio. Start it in case an older module version stopped it.
+def ensure_bluetoothd_running():
+    subprocess.run(["systemctl", "start", "bluetooth"], check=False)
 
 class bluetooth(Sensor, Reconfigurable):
     MODEL: ClassVar[Model] = Model(ModelFamily("viam-soleng", "presence"), "bluetooth")
@@ -151,7 +128,7 @@ class bluetooth(Sensor, Reconfigurable):
     # Constructor
     @classmethod
     def new(cls, config: ComponentConfig, dependencies: Mapping[ResourceName, ResourceBase]) -> Self:
-        restart_bluetooth_without_a2dp()
+        ensure_bluetoothd_running()
         my_class = cls(config.name)
         my_class.reconfigure(config, dependencies)
         return my_class
