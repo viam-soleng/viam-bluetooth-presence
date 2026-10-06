@@ -45,6 +45,8 @@ AGENT_MANAGER_IFACE = 'org.bluez.AgentManager1'
 
 LOGGER = getLogger(__name__)
 
+CONNECT_RETRY_SECONDS = 10
+
 def enable_onboard_bluetooth():
     try:
         # Check if Bluetooth via GPIO pin PA.04 is already enabled (and is currently working)
@@ -334,6 +336,7 @@ class BluetoothManager:
 
         self.paired_devices = {}
         self.present_devices = {}
+        self.connect_attempts = {}
         # we could make this configurable but it should be stable here
         self.db_conn = sqlite3.connect( str(Path.home()) + '/.viam/paired_devices.db')        
         self.create_db_table()
@@ -723,9 +726,8 @@ class BluetoothManager:
                 # a device that stays connected sends no new Connected events, so refresh it here
                 if properties.get("Connected", False):
                     self.update_present_device(path)
-                elif not self.is_device_present(address):
-                    LOGGER.debug(f"Attempting to automatically connect to known device: {name} ({address})")
-                    self.auto_connect_device(address)
+                else:
+                    self.auto_connect_device(path, address)
 
         # update present device list, removing devices not seen recently
         updated_present_devices = {}
@@ -736,55 +738,17 @@ class BluetoothManager:
                     updated_present_devices[device_id] = self.present_devices[device_id]
         self.present_devices = updated_present_devices
 
-    def auto_connect_device(self, address):
-        try:
-            device_path = self.find_device_by_address(address)
-            if device_path:
-                device = dbus.Interface(self.bus.get_object(BLUEZ_SERVICE_NAME, device_path), DBUS_PROP_IFACE)
-                props = device.GetAll(DEVICE_IFACE)
-
-                if not props.get("Connected", False):
-                    connect_method = dbus.Interface(self.bus.get_object(BLUEZ_SERVICE_NAME, device_path), DEVICE_IFACE)
-                    connect_method.Connect()
-                    LOGGER.info(f"Successfully initiated connection to device: {address}")
-                else:
-                    LOGGER.debug(f"Device {address} is already connected")
-                    return True
-            else:
-                LOGGER.debug(f"Device {address} not found for auto-connection")
-        except dbus.exceptions.DBusException as e:
-            LOGGER.debug(f"Error auto-connecting to device {address}: {e}")
-        return False
-
-    def is_device_present(self, address):
-        try:
-            device_path = self.find_device_by_address(address)
-            if device_path:
-                device = dbus.Interface(self.bus.get_object(BLUEZ_SERVICE_NAME, device_path), DBUS_PROP_IFACE)
-                props = device.GetAll(DEVICE_IFACE)
-
-                connected = props.get("Connected", False)
-                rssi = props.get("RSSI")
-                timestamp = props.get("Timestamp")
-
-                LOGGER.debug(f"Device {address} present check: Connected={connected}, RSSI={rssi}, Timestamp available: {timestamp is not None}")
-
-                # Consider the device present if it's connected or has a valid RSSI
-                is_present = connected or (rssi is not None and rssi <= 0)
-
-                if timestamp is not None:
-                    current_time = int(time.time() * 1000)  # Convert to milliseconds
-                    time_difference = current_time - int(timestamp)
-                    LOGGER.debug(f"Device {address} last seen {time_difference} ms ago")
-                    is_present = is_present and time_difference < 30000
-
-                return is_present
-            else:
-                LOGGER.debug(f"Device {address} not found in object manager")
-                return False
-        except dbus.exceptions.DBusException as e:
-            LOGGER.error(f"Error checking device presence for {address}: {e}")
-            return False
+    def auto_connect_device(self, device_path, address):
+        # Connect() blocks until BlueZ times out when the device is out of range,
+        # so call it asynchronously and at most once per CONNECT_RETRY_SECONDS
+        now = time.time()
+        if now - self.connect_attempts.get(address, 0) < CONNECT_RETRY_SECONDS:
+            return
+        self.connect_attempts[address] = now
+        LOGGER.debug(f"Attempting to automatically connect to known device: {address}")
+        device = dbus.Interface(self.bus.get_object(BLUEZ_SERVICE_NAME, device_path), DEVICE_IFACE)
+        device.Connect(reply_handler=lambda: LOGGER.debug(f"Connected to known device: {address}"),
+                       error_handler=lambda e: LOGGER.debug(f"Error auto-connecting to device {address}: {e}"))
 
     def is_known_device(self, device_id, address, name, device_uuid):
         if device_id in self.paired_devices:
