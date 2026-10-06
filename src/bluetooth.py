@@ -428,10 +428,7 @@ class BluetoothManager:
             return []
         
         pairing_requests = []
-        current_time = time.time()
-        # rebuild rather than del while iterating, which skips the next request
-        self.agent.pairing_requests = [request for request in self.agent.pairing_requests
-                                       if current_time - request["when"] < self.pairing_accept_timeout]
+        self.prune_pairing_requests()
         for request in self.agent.pairing_requests:
             pairing_requests.append ({
                 'passkey': request["passkey"],
@@ -456,15 +453,31 @@ class BluetoothManager:
         self.db_conn.commit()
         LOGGER.info(f"Removed device {device_id} from database")
 
-    def remove_all_physical_pairings(self):
-        objects = self.om.GetManagedObjects()
-        removed_count = 0
-        for path, interfaces in objects.items():
-            if DEVICE_IFACE in interfaces:
-                if self.remove_physical_pairing(path):
-                    removed_count += 1
-        LOGGER.info(f"Removed {removed_count} paired devices")
-        return removed_count
+    def prune_pairing_requests(self):
+        if not self.agent:
+            return
+        current_time = time.time()
+        expired = [request for request in self.agent.pairing_requests
+                   if current_time - request["when"] >= self.pairing_accept_timeout]
+        # rebuild rather than del while iterating, which skips the next request
+        self.agent.pairing_requests = [request for request in self.agent.pairing_requests
+                                       if current_time - request["when"] < self.pairing_accept_timeout]
+        self.unpair_expired_requests(expired)
+
+    def unpair_expired_requests(self, expired):
+        # the agent confirms every pairing, so unpair devices nobody accepted in time
+        pending = {request["device"] for request in self.agent.pairing_requests}
+        for device_path in {request["device"] for request in expired} - pending:
+            address = self.device_address(device_path)
+            if address and not any(info["address"] == address for info in self.paired_devices.values()):
+                self.remove_physical_pairing(device_path)
+
+    def device_address(self, device_path):
+        try:
+            device = dbus.Interface(self.bus.get_object(BLUEZ_SERVICE_NAME, device_path), DBUS_PROP_IFACE)
+            return str(device.Get(DEVICE_IFACE, "Address"))
+        except dbus.exceptions.DBusException:
+            return None
 
     def accept_pairing_request(self, device, label):
         if self.agent:
@@ -477,7 +490,6 @@ class BluetoothManager:
                 return False
             # a device can have several requests queued; drop them all and pair once
             self.agent.pairing_requests = remaining
-            self.remove_all_physical_pairings()
             return True
         else:
             LOGGER.error("Agent not initialized")
@@ -487,6 +499,9 @@ class BluetoothManager:
         if self.agent:
             forgot = False
             if device in self.paired_devices:
+                device_path = self.find_device_by_address(self.paired_devices[device]["address"])
+                if device_path:
+                    self.remove_physical_pairing(device_path)
                 self.remove_device_from_db(device)
                 del self.paired_devices[device]
                 LOGGER.info(f"Known device forgotten: {device}")
@@ -688,6 +703,7 @@ class BluetoothManager:
             else:
                 LOGGER.debug("Discovery already active, skipping start")
             self.check_for_devices()
+            self.prune_pairing_requests()
         except dbus.exceptions.DBusException as e:
             LOGGER.error(f"Error during periodic scan: {e}")
         return True

@@ -11,7 +11,7 @@ This model:
 
 A Linux system running `bluetooth.service` with the a2dp plugin disabled, so the module doesn't take over audio from paired devices. JetPack on Jetson Orin disables it by default (`--noplugin=audio,a2dp,avrcp` in `nv-bluetooth-service.conf`). On other systems, add `--noplugin=a2dp` to the bluetoothd `ExecStart` line (see [Notes](#notes)).
 
-Don't use this module on a system that needs Bluetooth for anything else. Accepting a pairing request removes all BlueZ pairings on the machine.
+Don't use this module on a system that needs Bluetooth for anything else. The module confirms every pairing at the Bluetooth level, then unpairs any device whose pairing request isn't accepted before it expires.
 
 ## Build and run
 
