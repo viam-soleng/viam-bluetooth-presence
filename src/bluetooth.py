@@ -381,7 +381,8 @@ class BluetoothManager:
     def properties_changed(self, interface, changed, invalidated, path):
         if interface != DEVICE_IFACE:
             return
-        if "Connected" in changed:            
+        # only a connect marks a device present; a disconnect means it is leaving
+        if changed.get("Connected"):
             for i, request in enumerate(self.agent.pairing_requests):
                 if path == request["device"]:
                     LOGGER.info("PAIRING")
