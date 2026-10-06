@@ -24,6 +24,7 @@ import uuid
 from pathlib import Path
 import datetime
 import subprocess
+import socket
 
 try:
     from gi.repository import GLib
@@ -45,7 +46,8 @@ AGENT_MANAGER_IFACE = 'org.bluez.AgentManager1'
 
 LOGGER = getLogger(__name__)
 
-CONNECT_RETRY_SECONDS = 10
+PRESENCE_CHECK_SECONDS = 10
+SDP_PSM = 1
 
 # audio profiles, rejected so phones don't use the machine as a speaker or headset
 AUDIO_SERVICE_UUIDS = {
@@ -59,6 +61,18 @@ AUDIO_SERVICE_UUIDS = {
     "0000111e-0000-1000-8000-00805f9b34fb",  # Hands-Free
     "0000111f-0000-1000-8000-00805f9b34fb",  # Hands-Free audio gateway
 }
+
+def l2cap_reachable(address):
+    # every BR/EDR device answers on the SDP channel, so connecting to it shows the device is in range
+    sock = socket.socket(socket.AF_BLUETOOTH, socket.SOCK_SEQPACKET, socket.BTPROTO_L2CAP)
+    sock.settimeout(10)
+    try:
+        sock.connect((address, SDP_PSM))
+        return True
+    except OSError:
+        return False
+    finally:
+        sock.close()
 
 class Rejected(dbus.DBusException):
     _dbus_error_name = "org.bluez.Error.Rejected"
@@ -365,7 +379,8 @@ class BluetoothManager:
 
         self.paired_devices = {}
         self.present_devices = {}
-        self.connect_attempts = {}
+        self.last_checks = {}
+        self.checks_in_flight = set()
         # we could make this configurable but it should be stable here
         self.db_conn = sqlite3.connect( str(Path.home()) + '/.viam/paired_devices.db')        
         self.create_db_table()
@@ -777,7 +792,7 @@ class BluetoothManager:
                 if properties.get("Connected", False):
                     self.update_present_device(path)
                 else:
-                    self.auto_connect_device(path, address)
+                    self.check_device_in_range(path, address)
 
         # update present device list, removing devices not seen recently
         updated_present_devices = {}
@@ -788,17 +803,26 @@ class BluetoothManager:
                     updated_present_devices[device_id] = self.present_devices[device_id]
         self.present_devices = updated_present_devices
 
-    def auto_connect_device(self, device_path, address):
-        # Connect() blocks until BlueZ times out when the device is out of range,
-        # so call it asynchronously and at most once per CONNECT_RETRY_SECONDS
+    def check_device_in_range(self, device_path, address):
+        # Device.Connect() only succeeds if one of the device's profiles connects, which depends on
+        # the machine's audio and network setup. An L2CAP connection works for any device in range.
+        # It can take seconds, so run it off the main loop, at most once per PRESENCE_CHECK_SECONDS.
         now = time.time()
-        if now - self.connect_attempts.get(address, 0) < CONNECT_RETRY_SECONDS:
+        if address in self.checks_in_flight or now - self.last_checks.get(address, 0) < PRESENCE_CHECK_SECONDS:
             return
-        self.connect_attempts[address] = now
-        LOGGER.debug(f"Attempting to automatically connect to known device: {address}")
-        device = dbus.Interface(self.bus.get_object(BLUEZ_SERVICE_NAME, device_path), DEVICE_IFACE)
-        device.Connect(reply_handler=lambda: LOGGER.debug(f"Connected to known device: {address}"),
-                       error_handler=lambda e: LOGGER.debug(f"Error auto-connecting to device {address}: {e}"))
+        self.last_checks[address] = now
+        self.checks_in_flight.add(address)
+        future = asyncio.get_running_loop().run_in_executor(None, l2cap_reachable, address)
+        future.add_done_callback(lambda done: self.device_check_done(done, device_path, address))
+
+    def device_check_done(self, future, device_path, address):
+        self.checks_in_flight.discard(address)
+        if self.running and future.exception() is None and future.result():
+            LOGGER.debug(f"Known device in range: {address}")
+            try:
+                self.update_present_device(device_path)
+            except dbus.exceptions.DBusException as e:
+                LOGGER.debug(f"Unable to update present device {address}: {e}")
 
     def is_known_device(self, device_id, address, name, device_uuid):
         if device_id in self.paired_devices:
