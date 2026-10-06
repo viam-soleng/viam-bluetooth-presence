@@ -165,6 +165,7 @@ class bluetooth(Sensor, Reconfigurable):
     def reconfigure(self, config: ComponentConfig, dependencies: Mapping[ResourceName, ResourceBase]):
         if self.manager:
             self.manager.stop()
+            self.manager = None
 
         self.advertisement_name = config.attributes.fields["advertisement_name"].string_value or "Viam Presence"
         self.pairing_accept_timeout = int(config.attributes.fields["pairing_accept_timeout"].number_value) or 60
@@ -176,22 +177,41 @@ class bluetooth(Sensor, Reconfigurable):
         return
     
     async def close(self):
-        self.manager.stop()
+        if self.manager:
+            self.manager.stop()
+            self.manager = None
         return await super().close()
-    
+
     async def start_btmanager(self):
-        self.manager = BluetoothManager(auto_accept=False, custom_name=self.advertisement_name,
-                                        pairing_accept_timeout=self.pairing_accept_timeout, device_present_linger=self.device_present_linger)
-        self.bus = dbus.SystemBus()
-        await self.manager.start()
+        # runs as a background task, so log failures here or they are never seen
+        manager = None
+        try:
+            manager = BluetoothManager(auto_accept=False, custom_name=self.advertisement_name,
+                                       pairing_accept_timeout=self.pairing_accept_timeout, device_present_linger=self.device_present_linger)
+            self.manager = manager
+            self.bus = dbus.SystemBus()
+            await manager.start()
+        except Exception as e:
+            LOGGER.error(f"Error initializing or running BluetoothManager: {e}")
+            if manager:
+                manager.stop()
+            # a later reconfigure may have replaced the manager already
+            if self.manager is manager:
+                self.manager = None
+
+    def require_manager(self):
+        if not self.manager:
+            raise RuntimeError("Bluetooth manager is not running; check the module logs")
+        return self.manager
 
     async def get_readings(
         self, *, extra: Optional[Mapping[str, Any]] = None, timeout: Optional[float] = None, **kwargs
     ) -> Mapping[str, SensorReading]:
-        ret = { 
-            "present_devices": self.manager.present_devices,
-            "known_devices": self.manager.paired_devices,
-            "pairing_requests": self.manager.current_pairing_requests()
+        manager = self.require_manager()
+        ret = {
+            "present_devices": manager.present_devices,
+            "known_devices": manager.paired_devices,
+            "pairing_requests": manager.current_pairing_requests()
         }
         return ret
 
@@ -203,15 +223,16 @@ class bluetooth(Sensor, Reconfigurable):
                 **kwargs
             ) -> Mapping[str, ValueTypes]:
         result = {}
+        manager = self.require_manager()
         if 'command' in command:
             if command['command'] == 'accept_pairing_request':
                 label = ""
                 if "label" in command:
                     label = command["label"]
-                paired = self.manager.accept_pairing_request(command["device"], label)
+                paired = manager.accept_pairing_request(command["device"], label)
                 return { "paired": paired }
             if command['command'] == 'forget_device':
-                forgot = self.manager.forget_device(command["device"])  
+                forgot = manager.forget_device(command["device"])  
                 return { "forgot": forgot }
 
 class Advertisement(dbus.service.Object):
