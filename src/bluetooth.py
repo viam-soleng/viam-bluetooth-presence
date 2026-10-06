@@ -755,20 +755,22 @@ class BluetoothManager:
             LOGGER.debug(f"Device {name} ({address}) found in paired_devices by ID")
             return True
     
-        # update device info if it changed
+        # match on address only: names and the first service UUID are shared across many
+        # devices. A bonded device keeps its address, because BlueZ resolves its rotating
+        # private address to its identity address.
         for stored_id, stored_info in self.paired_devices.items():
-            # note that we have matching by name commented out as it would likely be too insecure
-            if (stored_info['address'] == address or 
-            #    (name != "<unknown>" and stored_info['name'] == name) or 
-                (device_uuid and stored_info['uuid'] == device_uuid)):
+            if stored_info['address'] == address:
                 LOGGER.debug(f"Device {name} ({address}) matched with stored device {stored_info['name']} ({stored_info['address']})")
                 updated_name = name if name != "<unknown>" else f"Unknown Device ({address[-6:]})"
-                self.paired_devices[stored_id] = {
+                updated_info = {
                     'address': address,
                     'name': updated_name,
                     'uuid': device_uuid
                 }
-                self.update_device_in_db(stored_id, address, updated_name, device_uuid)
+                # the scan runs every second, so only write to the database when something changed
+                if updated_info != stored_info:
+                    self.paired_devices[stored_id] = updated_info
+                    self.update_device_in_db(stored_id, address, updated_name, device_uuid)
                 return True
     
         LOGGER.debug(f"Device {name} ({address}) is not a known device")
