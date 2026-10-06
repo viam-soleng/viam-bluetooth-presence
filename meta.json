@@ -11,7 +11,7 @@
     }
   ],
   "build": {
-    "build": "tar czf module.tar.gz meta.json main.py run.sh requirements.txt src",
+    "build": "make module.tar.gz",
     "path": "module.tar.gz",
     "arch": ["linux/arm64", "linux/amd64"]
   },
