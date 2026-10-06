@@ -164,7 +164,6 @@ class bluetooth(Sensor, Reconfigurable):
     # Handles attribute reconfiguration
     def reconfigure(self, config: ComponentConfig, dependencies: Mapping[ResourceName, ResourceBase]):
         if self.manager:
-            self.manager.running = False
             self.manager.stop()
 
         self.advertisement_name = config.attributes.fields["advertisement_name"].string_value or "Viam Presence"
@@ -174,9 +173,6 @@ class bluetooth(Sensor, Reconfigurable):
             asyncio.ensure_future(self.start_btmanager())
         except Exception as e:
             LOGGER.error(f"Error initializing or running BluetoothManager: {e}")
-        finally:
-            if self.manager:
-                self.manager.stop()
         return
     
     async def close(self):
@@ -354,7 +350,7 @@ class BluetoothManager:
         self.pairing_accept_timeout = pairing_accept_timeout
         self.device_present_linger = device_present_linger
 
-        self.bus.add_signal_receiver(
+        self.signal_match = self.bus.add_signal_receiver(
                     self.properties_changed,
                     dbus_interface="org.freedesktop.DBus.Properties",
                     signal_name="PropertiesChanged",
@@ -416,10 +412,12 @@ class BluetoothManager:
         if self.advertisement:
             try:
                 self.ad_manager.UnregisterAdvertisement(self.advertisement)
-                self.advertisement = None
                 LOGGER.info("Advertisement stopped")
             except dbus.exceptions.DBusException as e:
                 LOGGER.error(f"Error unregistering advertisement: {e}")
+            # SystemBus() is shared, so the next manager re-exports this path
+            self.advertisement.remove_from_connection()
+            self.advertisement = None
         else:
             LOGGER.warning("No advertisement running")
 
@@ -626,7 +624,20 @@ class BluetoothManager:
 
     def stop(self):
         LOGGER.info("Stopping Bluetooth Manager...")
+        self.running = False
         self.stop_advertising()
+
+        if self.agent:
+            try:
+                self.agent_manager.UnregisterAgent(self.agent.get_path())
+            except dbus.exceptions.DBusException as e:
+                LOGGER.error(f"Error unregistering agent: {e}")
+            self.agent.remove_from_connection()
+            self.agent = None
+
+        if self.signal_match:
+            self.signal_match.remove()
+            self.signal_match = None
 
         if self.discovery_active:
             try:
