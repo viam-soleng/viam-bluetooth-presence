@@ -355,12 +355,9 @@ class BluetoothManager:
     def properties_changed(self, interface, changed, invalidated, path):
         if interface != DEVICE_IFACE:
             return
-        # only a connect marks a device present; a disconnect means it is leaving
+        # only a connect marks a device present; a disconnect means it is leaving.
+        # check_for_devices keeps only known devices, so a device mid-pairing is harmless here.
         if changed.get("Connected"):
-            for i, request in enumerate(self.agent.pairing_requests):
-                if path == request["device"]:
-                    LOGGER.info("PAIRING")
-                    return
             self.update_present_device(path)
             
     def create_db_table(self):
@@ -723,7 +720,10 @@ class BluetoothManager:
             device_uuid = uuids[0] if uuids else ""
             device_id = str(uuid.uuid5(uuid.NAMESPACE_DNS, name + address))
             if self.is_known_device(device_id, address, name, device_uuid):
-                if not self.is_device_present(address):
+                # a device that stays connected sends no new Connected events, so refresh it here
+                if properties.get("Connected", False):
+                    self.update_present_device(path)
+                elif not self.is_device_present(address):
                     LOGGER.debug(f"Attempting to automatically connect to known device: {name} ({address})")
                     self.auto_connect_device(address)
 
