@@ -1,12 +1,9 @@
 import asyncio
-import sys
 
 from viam.module.module import Module
 from viam.components.sensor import Sensor
 from src.bluetooth import bluetooth
 from viam.resource.registry import Registry, ResourceCreatorRegistration
-
-from src.bluetooth import bluetooth
 
 
 async def main():

@@ -1,6 +1,6 @@
 # Viam bluetooth presence modular resource
 
-This module implements the [rdk sensor API](https://github.com/rdk/sensor-api) in a mcvella:presence:bluetooth model.
+This module implements the [rdk sensor API](https://docs.viam.com/components/sensor/) in a `viam-soleng:presence:bluetooth` model.
 This model:
 
 * Creates a Bluetooth Low Energy advertisement on bluetooth-equipped Linux systems.
@@ -9,15 +9,13 @@ This model:
 
 ## Requirements
 
-A Linux system running bluetoothd.
+A Linux system running `bluetooth.service` with the a2dp plugin disabled, so the module doesn't take over audio from paired devices. JetPack on Jetson Orin disables it by default (`--noplugin=audio,a2dp,avrcp` in `nv-bluetooth-service.conf`). On other systems, add `--noplugin=a2dp` to the bluetoothd `ExecStart` line (see [Notes](#notes)).
 
-*Note* that in order to not "take over" audio from paired devices, bluetoothd must be run without the "a2dp" plugin.
-This module will restart the system bluetoothd on start, passing in the "-P a2dp" flag.
-Therefore, it is not recommended that you use this module on a linux system that you are using for other bluetooth functionality.
+Don't use this module on a system that needs Bluetooth for anything else. Accepting a pairing request removes all BlueZ pairings on the machine.
 
 ## Build and run
 
-To use this module, follow the instructions to [add a module from the Viam Registry](https://docs.viam.com/registry/configure/#add-a-modular-resource-from-the-viam-registry) and select the `mcvella:presence:bluetooth` model from the [`mcvella:presence:bluetooth` module](https://app.viam.com/module/rdk/mcvella:presence:bluetooth).
+To use this module, follow the instructions to [add a module from the Viam Registry](https://docs.viam.com/registry/configure/#add-a-modular-resource-from-the-viam-registry) and select the `viam-soleng:presence:bluetooth` model from the [`viam-soleng:bluetooth-presence` module](https://app.viam.com/module/viam-soleng/bluetooth-presence).
 
 ## Configure your sensor
 
@@ -26,7 +24,7 @@ To use this module, follow the instructions to [add a module from the Viam Regis
 
 Navigate to the **Config** tab of your machine's page in [the Viam app](https://app.viam.com/).
 Click on the **Components** subtab and click **Create component**.
-Select the `sensor` type, then select the `mcvella:presence:bluetooth` model.
+Select the `sensor` type, then select the `viam-soleng:presence:bluetooth` model.
 Click **Add module**, then enter a name for your sensor and click **Create**.
 
 On the new component panel, copy and paste the following attribute template into your sensor’s **Attributes** box:
@@ -44,7 +42,7 @@ On the new component panel, copy and paste the following attribute template into
 
 ### Attributes
 
-The following attributes are available for `mcvella:presence:bluetooth` sensors:
+The following attributes are available for `viam-soleng:presence:bluetooth` sensors:
 
 | Name | Type | Inclusion | Description |
 | ---- | ---- | --------- | ----------- |
@@ -144,7 +142,7 @@ sms.do_command({"command": "forget_device", "device": "b55a70ba-6830-5b26-a291-c
 
 ## Notes
 
-You shouldn't need to modify your bluetoothd configuration on most systems to run this module, but if you do, it is likely located at:
+On JetPack you shouldn't need to modify your bluetoothd configuration. On other systems, it is likely located at:
 
 /lib/systemd/system/bluetooth.service or /etc/systemd/system/dbus-org.bluez.service
 

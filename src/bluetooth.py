@@ -1,17 +1,14 @@
-from typing import ClassVar, Mapping, Sequence, Any, Dict, Optional, Tuple, Final, List, cast
+from typing import ClassVar, Mapping, Sequence, Any, Optional, Tuple
 from typing_extensions import Self
-
-from typing import Any, Final, Mapping, Optional
-
 
 from viam.utils import SensorReading
 
 from viam.module.types import Reconfigurable
 from viam.proto.app.robot import ComponentConfig
-from viam.proto.common import ResourceName, Vector3
+from viam.proto.common import ResourceName
 from viam.resource.base import ResourceBase
 from viam.resource.types import Model, ModelFamily
-from viam.utils import ValueTypes, struct_to_dict
+from viam.utils import ValueTypes
 
 from viam.components.sensor import Sensor
 from viam.logging import getLogger
@@ -27,8 +24,6 @@ import uuid
 from pathlib import Path
 import datetime
 import subprocess
-import os
-import signal
 
 try:
     from gi.repository import GLib
@@ -49,8 +44,6 @@ AGENT_IFACE = 'org.bluez.Agent1'
 AGENT_MANAGER_IFACE = 'org.bluez.AgentManager1'
 
 LOGGER = getLogger(__name__)
-
-PID_FILE = "/tmp/bluetoothd_program.pid"
 
 def enable_onboard_bluetooth():
     try:
@@ -112,29 +105,10 @@ try:
 except Exception as e:
     LOGGER.error(f"Error during onboard Bluetooth initialization: {e}")
 
-# the plugin a2dp seems to "take over" device audio, so we take over the bluetoothd
-# to disable plugin, preventing this from happening.  
-def restart_bluetooth_without_a2dp():
-    stop_bluetoothd_if_running()
-
-    # Stop the Bluetooth service
-    subprocess.run([ "systemctl", "stop", "bluetooth"], check=True)
-    
-    bluetoothd_process = subprocess.Popen(["bluetoothd", "-P", "a2dp"])
-    with open(PID_FILE, "w") as f:
-        f.write(str(bluetoothd_process.pid))
-    time.sleep(5)
-
-def stop_bluetoothd_if_running():
-    if os.path.exists(PID_FILE):
-        with open(PID_FILE, "r") as f:
-            pid = int(f.read().strip())
-            try:
-                os.kill(pid, signal.SIGTERM)  # try to terminate gracefully
-                os.remove(PID_FILE) 
-            except ProcessLookupError:
-                # process doesn't exist, remove stale PID file
-                os.remove(PID_FILE)
+# JetPack's bluetooth.service already runs bluetoothd with --noplugin=audio,a2dp,avrcp,
+# so a2dp can't take over device audio. Start it in case an older module version stopped it.
+def ensure_bluetoothd_running():
+    subprocess.run(["systemctl", "start", "bluetooth"], check=False)
 
 class bluetooth(Sensor, Reconfigurable):
     MODEL: ClassVar[Model] = Model(ModelFamily("viam-soleng", "presence"), "bluetooth")
@@ -151,21 +125,21 @@ class bluetooth(Sensor, Reconfigurable):
     # Constructor
     @classmethod
     def new(cls, config: ComponentConfig, dependencies: Mapping[ResourceName, ResourceBase]) -> Self:
-        restart_bluetooth_without_a2dp()
+        ensure_bluetoothd_running()
         my_class = cls(config.name)
         my_class.reconfigure(config, dependencies)
         return my_class
 
     # Validates JSON Configuration
     @classmethod
-    def validate(cls, config: ComponentConfig):
-        return
+    def validate(cls, config: ComponentConfig) -> Tuple[Sequence[str], Sequence[str]]:
+        return [], []
 
     # Handles attribute reconfiguration
     def reconfigure(self, config: ComponentConfig, dependencies: Mapping[ResourceName, ResourceBase]):
         if self.manager:
-            self.manager.running = False
             self.manager.stop()
+            self.manager = None
 
         self.advertisement_name = config.attributes.fields["advertisement_name"].string_value or "Viam Presence"
         self.pairing_accept_timeout = int(config.attributes.fields["pairing_accept_timeout"].number_value) or 60
@@ -174,28 +148,44 @@ class bluetooth(Sensor, Reconfigurable):
             asyncio.ensure_future(self.start_btmanager())
         except Exception as e:
             LOGGER.error(f"Error initializing or running BluetoothManager: {e}")
-        finally:
-            if self.manager:
-                self.manager.stop()
         return
     
     async def close(self):
-        self.manager.stop()
+        if self.manager:
+            self.manager.stop()
+            self.manager = None
         return await super().close()
-    
+
     async def start_btmanager(self):
-        self.manager = BluetoothManager(auto_accept=False, custom_name=self.advertisement_name,
-                                        pairing_accept_timeout=self.pairing_accept_timeout, device_present_linger=self.device_present_linger)
-        self.bus = dbus.SystemBus()
-        await self.manager.start()
+        # runs as a background task, so log failures here or they are never seen
+        manager = None
+        try:
+            manager = BluetoothManager(auto_accept=False, custom_name=self.advertisement_name,
+                                       pairing_accept_timeout=self.pairing_accept_timeout, device_present_linger=self.device_present_linger)
+            self.manager = manager
+            self.bus = dbus.SystemBus()
+            await manager.start()
+        except Exception as e:
+            LOGGER.error(f"Error initializing or running BluetoothManager: {e}")
+            if manager:
+                manager.stop()
+            # a later reconfigure may have replaced the manager already
+            if self.manager is manager:
+                self.manager = None
+
+    def require_manager(self):
+        if not self.manager:
+            raise RuntimeError("Bluetooth manager is not running; check the module logs")
+        return self.manager
 
     async def get_readings(
         self, *, extra: Optional[Mapping[str, Any]] = None, timeout: Optional[float] = None, **kwargs
     ) -> Mapping[str, SensorReading]:
-        ret = { 
-            "present_devices": self.manager.present_devices,
-            "known_devices": self.manager.paired_devices,
-            "pairing_requests": self.manager.current_pairing_requests()
+        manager = self.require_manager()
+        ret = {
+            "present_devices": manager.present_devices,
+            "known_devices": manager.paired_devices,
+            "pairing_requests": manager.current_pairing_requests()
         }
         return ret
 
@@ -207,15 +197,16 @@ class bluetooth(Sensor, Reconfigurable):
                 **kwargs
             ) -> Mapping[str, ValueTypes]:
         result = {}
+        manager = self.require_manager()
         if 'command' in command:
             if command['command'] == 'accept_pairing_request':
                 label = ""
                 if "label" in command:
                     label = command["label"]
-                paired = self.manager.accept_pairing_request(command["device"], label)
+                paired = manager.accept_pairing_request(command["device"], label)
                 return { "paired": paired }
             if command['command'] == 'forget_device':
-                forgot = self.manager.forget_device(command["device"])  
+                forgot = manager.forget_device(command["device"])  
                 return { "forgot": forgot }
 
 class Advertisement(dbus.service.Object):
@@ -354,7 +345,7 @@ class BluetoothManager:
         self.pairing_accept_timeout = pairing_accept_timeout
         self.device_present_linger = device_present_linger
 
-        self.bus.add_signal_receiver(
+        self.signal_match = self.bus.add_signal_receiver(
                     self.properties_changed,
                     dbus_interface="org.freedesktop.DBus.Properties",
                     signal_name="PropertiesChanged",
@@ -364,7 +355,8 @@ class BluetoothManager:
     def properties_changed(self, interface, changed, invalidated, path):
         if interface != DEVICE_IFACE:
             return
-        if "Connected" in changed:            
+        # only a connect marks a device present; a disconnect means it is leaving
+        if changed.get("Connected"):
             for i, request in enumerate(self.agent.pairing_requests):
                 if path == request["device"]:
                     LOGGER.info("PAIRING")
@@ -416,10 +408,12 @@ class BluetoothManager:
         if self.advertisement:
             try:
                 self.ad_manager.UnregisterAdvertisement(self.advertisement)
-                self.advertisement = None
                 LOGGER.info("Advertisement stopped")
             except dbus.exceptions.DBusException as e:
                 LOGGER.error(f"Error unregistering advertisement: {e}")
+            # SystemBus() is shared, so the next manager re-exports this path
+            self.advertisement.remove_from_connection()
+            self.advertisement = None
         else:
             LOGGER.warning("No advertisement running")
 
@@ -435,15 +429,15 @@ class BluetoothManager:
         
         pairing_requests = []
         current_time = time.time()
-        for i, request in enumerate(self.agent.pairing_requests):
-            if current_time - request["when"] < self.pairing_accept_timeout:
-                pairing_requests.append ({
-                    'passkey': request["passkey"],
-                    'device': str(request["device"]),
-                    'when': datetime.datetime.fromtimestamp(request["when"]).isoformat()
-                })
-            else:
-                del self.agent.pairing_requests[i]
+        # rebuild rather than del while iterating, which skips the next request
+        self.agent.pairing_requests = [request for request in self.agent.pairing_requests
+                                       if current_time - request["when"] < self.pairing_accept_timeout]
+        for request in self.agent.pairing_requests:
+            pairing_requests.append ({
+                'passkey': request["passkey"],
+                'device': str(request["device"]),
+                'when': datetime.datetime.fromtimestamp(request["when"]).isoformat()
+            })
         return pairing_requests
 
     def remove_physical_pairing(self, device_path):
@@ -474,16 +468,17 @@ class BluetoothManager:
 
     def accept_pairing_request(self, device, label):
         if self.agent:
-            paired = False
-            for i, request in enumerate(self.agent.pairing_requests):
-                if request["device"] == device:
-                    del self.agent.pairing_requests[i]
-                    self.add_paired_device(device, label)
-                    self.remove_all_physical_pairings()
-                    paired = True
-            if not paired:
+            remaining = [request for request in self.agent.pairing_requests if request["device"] != device]
+            if len(remaining) == len(self.agent.pairing_requests):
                 LOGGER.warning(f"No pairing request found for device: {device}")
-            return paired
+                return False
+            # keep the request queued on failure so it can be retried until it expires
+            if not self.add_paired_device(device, label):
+                return False
+            # a device can have several requests queued; drop them all and pair once
+            self.agent.pairing_requests = remaining
+            self.remove_all_physical_pairings()
+            return True
         else:
             LOGGER.error("Agent not initialized")
             return False
@@ -535,9 +530,13 @@ class BluetoothManager:
             name = device.Get(DEVICE_IFACE, "Name")
         except dbus.exceptions.DBusException:
             LOGGER.error(f"Unable to get device properties for {device_path}")
-            return
+            return False
 
-        uuids = device.Get(DEVICE_IFACE, "UUIDs")
+        try:
+            uuids = device.Get(DEVICE_IFACE, "UUIDs")
+        except dbus.exceptions.DBusException:
+            # BlueZ omits UUIDs for devices that advertise no services
+            uuids = []
         device_uuid = uuids[0] if uuids else ""
         device_id = label or str(uuid.uuid5(uuid.NAMESPACE_DNS, name + address))
 
@@ -548,6 +547,7 @@ class BluetoothManager:
         }
         self.update_device_in_db(device_id, address, name, device_uuid)
         LOGGER.info(f"Added paired device to database: {name} ({address})")
+        return True
 
 
     async def start(self):
@@ -626,7 +626,20 @@ class BluetoothManager:
 
     def stop(self):
         LOGGER.info("Stopping Bluetooth Manager...")
+        self.running = False
         self.stop_advertising()
+
+        if self.agent:
+            try:
+                self.agent_manager.UnregisterAgent(self.agent.get_path())
+            except dbus.exceptions.DBusException as e:
+                LOGGER.error(f"Error unregistering agent: {e}")
+            self.agent.remove_from_connection()
+            self.agent = None
+
+        if self.signal_match:
+            self.signal_match.remove()
+            self.signal_match = None
 
         if self.discovery_active:
             try:
