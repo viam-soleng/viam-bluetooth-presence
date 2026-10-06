@@ -10,5 +10,10 @@
       "model": "viam-soleng:presence:bluetooth"
     }
   ],
+  "build": {
+    "build": "tar czf module.tar.gz meta.json main.py run.sh requirements.txt src",
+    "path": "module.tar.gz",
+    "arch": ["linux/arm64"]
+  },
   "entrypoint": "run.sh"
 }
