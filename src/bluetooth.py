@@ -454,15 +454,15 @@ class BluetoothManager:
         
         pairing_requests = []
         current_time = time.time()
-        for i, request in enumerate(self.agent.pairing_requests):
-            if current_time - request["when"] < self.pairing_accept_timeout:
-                pairing_requests.append ({
-                    'passkey': request["passkey"],
-                    'device': str(request["device"]),
-                    'when': datetime.datetime.fromtimestamp(request["when"]).isoformat()
-                })
-            else:
-                del self.agent.pairing_requests[i]
+        # rebuild rather than del while iterating, which skips the next request
+        self.agent.pairing_requests = [request for request in self.agent.pairing_requests
+                                       if current_time - request["when"] < self.pairing_accept_timeout]
+        for request in self.agent.pairing_requests:
+            pairing_requests.append ({
+                'passkey': request["passkey"],
+                'device': str(request["device"]),
+                'when': datetime.datetime.fromtimestamp(request["when"]).isoformat()
+            })
         return pairing_requests
 
     def remove_physical_pairing(self, device_path):
@@ -493,16 +493,15 @@ class BluetoothManager:
 
     def accept_pairing_request(self, device, label):
         if self.agent:
-            paired = False
-            for i, request in enumerate(self.agent.pairing_requests):
-                if request["device"] == device:
-                    del self.agent.pairing_requests[i]
-                    self.add_paired_device(device, label)
-                    self.remove_all_physical_pairings()
-                    paired = True
-            if not paired:
+            remaining = [request for request in self.agent.pairing_requests if request["device"] != device]
+            if len(remaining) == len(self.agent.pairing_requests):
                 LOGGER.warning(f"No pairing request found for device: {device}")
-            return paired
+                return False
+            # a device can have several requests queued; drop them all and pair once
+            self.agent.pairing_requests = remaining
+            self.add_paired_device(device, label)
+            self.remove_all_physical_pairings()
+            return True
         else:
             LOGGER.error("Agent not initialized")
             return False
