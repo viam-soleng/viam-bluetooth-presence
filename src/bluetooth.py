@@ -47,6 +47,22 @@ LOGGER = getLogger(__name__)
 
 CONNECT_RETRY_SECONDS = 10
 
+# audio profiles, rejected so phones don't use the machine as a speaker or headset
+AUDIO_SERVICE_UUIDS = {
+    "00001108-0000-1000-8000-00805f9b34fb",  # Headset
+    "0000110a-0000-1000-8000-00805f9b34fb",  # A2DP source
+    "0000110b-0000-1000-8000-00805f9b34fb",  # A2DP sink
+    "0000110c-0000-1000-8000-00805f9b34fb",  # AVRCP target
+    "0000110d-0000-1000-8000-00805f9b34fb",  # A2DP
+    "0000110e-0000-1000-8000-00805f9b34fb",  # AVRCP
+    "00001112-0000-1000-8000-00805f9b34fb",  # Headset audio gateway
+    "0000111e-0000-1000-8000-00805f9b34fb",  # Hands-Free
+    "0000111f-0000-1000-8000-00805f9b34fb",  # Hands-Free audio gateway
+}
+
+class Rejected(dbus.DBusException):
+    _dbus_error_name = "org.bluez.Error.Rejected"
+
 def enable_onboard_bluetooth():
     try:
         # Check if Bluetooth via GPIO pin PA.04 is already enabled (and is currently working)
@@ -286,6 +302,9 @@ class Agent(dbus.service.Object):
     @dbus.service.method(AGENT_IFACE, in_signature="os", out_signature="")
     def AuthorizeService(self, device, uuid):
         LOGGER.info(f"AuthorizeService ({device}, {uuid})")
+        if str(uuid).lower() in AUDIO_SERVICE_UUIDS:
+            LOGGER.info(f"Rejecting audio service {uuid} for {device}")
+            raise Rejected("Audio services are not supported")
         return
 
     @dbus.service.method(AGENT_IFACE, in_signature="o", out_signature="")
