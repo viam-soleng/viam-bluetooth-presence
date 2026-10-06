@@ -1,5 +1,1 @@
 viam-sdk~=0.83.1
-dbus-python~=1.5.0
-# PyGObject 3.50.x supports Ubuntu 22.04 / JetPack 6. Don't upgrade to 3.52+
-PyGObject~=3.50.2
-pycairo~=1.29.2

@@ -4,13 +4,11 @@ cd "$(dirname "$0")"
 if [ ! -f .installed ]
   then
     export DEBIAN_FRONTEND=noninteractive
-    apt-get install -qq -y python3-venv build-essential libdbus-glib-1-dev libgirepository1.0-dev libcairo2-dev libxt-dev sqlite3
-    python3 -m venv viam-env
-    viam-env/bin/pip install -q --disable-pip-version-check --upgrade -r requirements.txt
-    if [ $? -eq 0 ]
-      then
-        touch .installed
-    fi
+    # PyGObject and dbus-python come from the OS, so pip compiles nothing
+    apt-get install -qq -y python3-venv python3-gi python3-dbus &&
+      python3 -m venv --system-site-packages viam-env &&
+      viam-env/bin/pip install -q --disable-pip-version-check --upgrade -r requirements.txt &&
+      touch .installed || exit 1
 fi
 
 source viam-env/bin/activate
