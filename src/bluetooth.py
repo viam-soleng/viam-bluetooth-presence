@@ -160,20 +160,30 @@ class bluetooth(Sensor, Reconfigurable):
 
     async def start_btmanager(self):
         # runs as a background task, so log failures here or they are never seen
-        manager = None
-        try:
-            manager = BluetoothManager(auto_accept=False, custom_name=self.advertisement_name,
-                                       pairing_accept_timeout=self.pairing_accept_timeout, device_present_linger=self.device_present_linger)
-            self.manager = manager
-            self.bus = dbus.SystemBus()
-            await manager.start()
-        except Exception as e:
-            LOGGER.error(f"Error initializing or running BluetoothManager: {e}")
-            if manager:
-                manager.stop()
-            # a later reconfigure may have replaced the manager already
-            if self.manager is manager:
-                self.manager = None
+        while True:
+            manager = None
+            try:
+                manager = BluetoothManager(auto_accept=False, custom_name=self.advertisement_name,
+                                           pairing_accept_timeout=self.pairing_accept_timeout, device_present_linger=self.device_present_linger)
+                self.manager = manager
+                self.bus = dbus.SystemBus()
+                await manager.start()
+            except Exception as e:
+                LOGGER.error(f"Error initializing or running BluetoothManager: {e}")
+                if manager:
+                    manager.stop()
+                # a later reconfigure may have replaced the manager already
+                if self.manager is manager:
+                    self.manager = None
+                return
+            # a restarted bluetoothd has forgotten the agent and advertisement, so start over
+            if not manager.bluez_restarted:
+                return
+            manager.stop()
+            await asyncio.sleep(2)
+            # a reconfigure or close during the wait replaces or clears the manager
+            if self.manager is not manager:
+                return
 
     def require_manager(self):
         if not self.manager:
@@ -354,6 +364,20 @@ class BluetoothManager:
                     signal_name="PropertiesChanged",
                     path_keyword="path"
                 )
+
+        # bluetoothd forgets the agent and advertisement when it restarts, so watch for a new owner
+        self.bluez_owner = None
+        self.bluez_restarted = False
+        self.bluez_watch = self.bus.watch_name_owner(BLUEZ_SERVICE_NAME, self.bluez_owner_changed)
+
+    def bluez_owner_changed(self, owner):
+        # the first call reports the current owner; an empty owner means bluetoothd is down
+        if self.bluez_owner is None:
+            self.bluez_owner = owner
+        elif owner and owner != self.bluez_owner:
+            LOGGER.warning("bluetoothd restarted, restarting the Bluetooth manager")
+            self.bluez_restarted = True
+            self.running = False
         
     def properties_changed(self, interface, changed, invalidated, path):
         if interface != DEVICE_IFACE:
@@ -406,11 +430,13 @@ class BluetoothManager:
            
     def stop_advertising(self):
         if self.advertisement:
-            try:
-                self.ad_manager.UnregisterAdvertisement(self.advertisement)
-                LOGGER.info("Advertisement stopped")
-            except dbus.exceptions.DBusException as e:
-                LOGGER.error(f"Error unregistering advertisement: {e}")
+            # a restarted bluetoothd has already forgotten the advertisement
+            if not self.bluez_restarted:
+                try:
+                    self.ad_manager.UnregisterAdvertisement(self.advertisement)
+                    LOGGER.info("Advertisement stopped")
+                except dbus.exceptions.DBusException as e:
+                    LOGGER.error(f"Error unregistering advertisement: {e}")
             # SystemBus() is shared, so the next manager re-exports this path
             self.advertisement.remove_from_connection()
             self.advertisement = None
@@ -645,10 +671,11 @@ class BluetoothManager:
         self.stop_advertising()
 
         if self.agent:
-            try:
-                self.agent_manager.UnregisterAgent(self.agent.get_path())
-            except dbus.exceptions.DBusException as e:
-                LOGGER.error(f"Error unregistering agent: {e}")
+            if not self.bluez_restarted:
+                try:
+                    self.agent_manager.UnregisterAgent(self.agent.get_path())
+                except dbus.exceptions.DBusException as e:
+                    LOGGER.error(f"Error unregistering agent: {e}")
             self.agent.remove_from_connection()
             self.agent = None
 
@@ -656,7 +683,11 @@ class BluetoothManager:
             self.signal_match.remove()
             self.signal_match = None
 
-        if self.discovery_active:
+        if self.bluez_watch:
+            self.bluez_watch.cancel()
+            self.bluez_watch = None
+
+        if self.discovery_active and not self.bluez_restarted:
             try:
                 self.adapter.StopDiscovery()
                 LOGGER.info("Discovery stopped")
