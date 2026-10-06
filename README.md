@@ -9,11 +9,9 @@ This model:
 
 ## Requirements
 
-A Linux system running bluetoothd.
+A Linux system running `bluetooth.service` with the a2dp plugin disabled, so the module doesn't take over audio from paired devices. JetPack on Jetson Orin disables it by default (`--noplugin=audio,a2dp,avrcp` in `nv-bluetooth-service.conf`). On other systems, add `--noplugin=a2dp` to the bluetoothd `ExecStart` line (see [Notes](#notes)).
 
-*Note* that in order to not "take over" audio from paired devices, bluetoothd must be run without the "a2dp" plugin.
-This module will restart the system bluetoothd on start, passing in the "-P a2dp" flag.
-Therefore, it is not recommended that you use this module on a linux system that you are using for other bluetooth functionality.
+Don't use this module on a system that needs Bluetooth for anything else. Accepting a pairing request removes all BlueZ pairings on the machine.
 
 ## Build and run
 
@@ -144,7 +142,7 @@ sms.do_command({"command": "forget_device", "device": "b55a70ba-6830-5b26-a291-c
 
 ## Notes
 
-You shouldn't need to modify your bluetoothd configuration on most systems to run this module, but if you do, it is likely located at:
+On JetPack you shouldn't need to modify your bluetoothd configuration. On other systems, it is likely located at:
 
 /lib/systemd/system/bluetooth.service or /etc/systemd/system/dbus-org.bluez.service
 
