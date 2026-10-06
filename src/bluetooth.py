@@ -158,8 +158,8 @@ class bluetooth(Sensor, Reconfigurable):
 
     # Validates JSON Configuration
     @classmethod
-    def validate(cls, config: ComponentConfig):
-        return
+    def validate(cls, config: ComponentConfig) -> Tuple[Sequence[str], Sequence[str]]:
+        return [], []
 
     # Handles attribute reconfiguration
     def reconfigure(self, config: ComponentConfig, dependencies: Mapping[ResourceName, ResourceBase]):
