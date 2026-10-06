@@ -1,17 +1,14 @@
-from typing import ClassVar, Mapping, Sequence, Any, Dict, Optional, Tuple, Final, List, cast
+from typing import ClassVar, Mapping, Sequence, Any, Optional, Tuple
 from typing_extensions import Self
-
-from typing import Any, Final, Mapping, Optional
-
 
 from viam.utils import SensorReading
 
 from viam.module.types import Reconfigurable
 from viam.proto.app.robot import ComponentConfig
-from viam.proto.common import ResourceName, Vector3
+from viam.proto.common import ResourceName
 from viam.resource.base import ResourceBase
 from viam.resource.types import Model, ModelFamily
-from viam.utils import ValueTypes, struct_to_dict
+from viam.utils import ValueTypes
 
 from viam.components.sensor import Sensor
 from viam.logging import getLogger
