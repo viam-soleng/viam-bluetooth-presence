@@ -24,6 +24,7 @@ import uuid
 from pathlib import Path
 import datetime
 import subprocess
+import socket
 
 try:
     from gi.repository import GLib
@@ -44,6 +45,37 @@ AGENT_IFACE = 'org.bluez.Agent1'
 AGENT_MANAGER_IFACE = 'org.bluez.AgentManager1'
 
 LOGGER = getLogger(__name__)
+
+PRESENCE_CHECK_SECONDS = 10
+SDP_PSM = 1
+
+# audio profiles, rejected so phones don't use the machine as a speaker or headset
+AUDIO_SERVICE_UUIDS = {
+    "00001108-0000-1000-8000-00805f9b34fb",  # Headset
+    "0000110a-0000-1000-8000-00805f9b34fb",  # A2DP source
+    "0000110b-0000-1000-8000-00805f9b34fb",  # A2DP sink
+    "0000110c-0000-1000-8000-00805f9b34fb",  # AVRCP target
+    "0000110d-0000-1000-8000-00805f9b34fb",  # A2DP
+    "0000110e-0000-1000-8000-00805f9b34fb",  # AVRCP
+    "00001112-0000-1000-8000-00805f9b34fb",  # Headset audio gateway
+    "0000111e-0000-1000-8000-00805f9b34fb",  # Hands-Free
+    "0000111f-0000-1000-8000-00805f9b34fb",  # Hands-Free audio gateway
+}
+
+def l2cap_reachable(address):
+    # every BR/EDR device answers on the SDP channel, so connecting to it shows the device is in range
+    sock = socket.socket(socket.AF_BLUETOOTH, socket.SOCK_SEQPACKET, socket.BTPROTO_L2CAP)
+    sock.settimeout(10)
+    try:
+        sock.connect((address, SDP_PSM))
+        return True
+    except OSError:
+        return False
+    finally:
+        sock.close()
+
+class Rejected(dbus.DBusException):
+    _dbus_error_name = "org.bluez.Error.Rejected"
 
 def enable_onboard_bluetooth():
     try:
@@ -158,20 +190,30 @@ class bluetooth(Sensor, Reconfigurable):
 
     async def start_btmanager(self):
         # runs as a background task, so log failures here or they are never seen
-        manager = None
-        try:
-            manager = BluetoothManager(auto_accept=False, custom_name=self.advertisement_name,
-                                       pairing_accept_timeout=self.pairing_accept_timeout, device_present_linger=self.device_present_linger)
-            self.manager = manager
-            self.bus = dbus.SystemBus()
-            await manager.start()
-        except Exception as e:
-            LOGGER.error(f"Error initializing or running BluetoothManager: {e}")
-            if manager:
-                manager.stop()
-            # a later reconfigure may have replaced the manager already
-            if self.manager is manager:
-                self.manager = None
+        while True:
+            manager = None
+            try:
+                manager = BluetoothManager(auto_accept=False, custom_name=self.advertisement_name,
+                                           pairing_accept_timeout=self.pairing_accept_timeout, device_present_linger=self.device_present_linger)
+                self.manager = manager
+                self.bus = dbus.SystemBus()
+                await manager.start()
+            except Exception as e:
+                LOGGER.error(f"Error initializing or running BluetoothManager: {e}")
+                if manager:
+                    manager.stop()
+                # a later reconfigure may have replaced the manager already
+                if self.manager is manager:
+                    self.manager = None
+                return
+            # a restarted bluetoothd has forgotten the agent and advertisement, so start over
+            if not manager.bluez_restarted:
+                return
+            manager.stop()
+            await asyncio.sleep(2)
+            # a reconfigure or close during the wait replaces or clears the manager
+            if self.manager is not manager:
+                return
 
     def require_manager(self):
         if not self.manager:
@@ -274,6 +316,9 @@ class Agent(dbus.service.Object):
     @dbus.service.method(AGENT_IFACE, in_signature="os", out_signature="")
     def AuthorizeService(self, device, uuid):
         LOGGER.info(f"AuthorizeService ({device}, {uuid})")
+        if str(uuid).lower() in AUDIO_SERVICE_UUIDS:
+            LOGGER.info(f"Rejecting audio service {uuid} for {device}")
+            raise Rejected("Audio services are not supported")
         return
 
     @dbus.service.method(AGENT_IFACE, in_signature="o", out_signature="")
@@ -334,6 +379,8 @@ class BluetoothManager:
 
         self.paired_devices = {}
         self.present_devices = {}
+        self.last_checks = {}
+        self.checks_in_flight = set()
         # we could make this configurable but it should be stable here
         self.db_conn = sqlite3.connect( str(Path.home()) + '/.viam/paired_devices.db')        
         self.create_db_table()
@@ -351,16 +398,27 @@ class BluetoothManager:
                     signal_name="PropertiesChanged",
                     path_keyword="path"
                 )
+
+        # bluetoothd forgets the agent and advertisement when it restarts, so watch for a new owner
+        self.bluez_owner = None
+        self.bluez_restarted = False
+        self.bluez_watch = self.bus.watch_name_owner(BLUEZ_SERVICE_NAME, self.bluez_owner_changed)
+
+    def bluez_owner_changed(self, owner):
+        # the first call reports the current owner; an empty owner means bluetoothd is down
+        if self.bluez_owner is None:
+            self.bluez_owner = owner
+        elif owner and owner != self.bluez_owner:
+            LOGGER.warning("bluetoothd restarted, restarting the Bluetooth manager")
+            self.bluez_restarted = True
+            self.running = False
         
     def properties_changed(self, interface, changed, invalidated, path):
         if interface != DEVICE_IFACE:
             return
-        # only a connect marks a device present; a disconnect means it is leaving
+        # only a connect marks a device present; a disconnect means it is leaving.
+        # check_for_devices keeps only known devices, so a device mid-pairing is harmless here.
         if changed.get("Connected"):
-            for i, request in enumerate(self.agent.pairing_requests):
-                if path == request["device"]:
-                    LOGGER.info("PAIRING")
-                    return
             self.update_present_device(path)
             
     def create_db_table(self):
@@ -406,11 +464,13 @@ class BluetoothManager:
            
     def stop_advertising(self):
         if self.advertisement:
-            try:
-                self.ad_manager.UnregisterAdvertisement(self.advertisement)
-                LOGGER.info("Advertisement stopped")
-            except dbus.exceptions.DBusException as e:
-                LOGGER.error(f"Error unregistering advertisement: {e}")
+            # a restarted bluetoothd has already forgotten the advertisement
+            if not self.bluez_restarted:
+                try:
+                    self.ad_manager.UnregisterAdvertisement(self.advertisement)
+                    LOGGER.info("Advertisement stopped")
+                except dbus.exceptions.DBusException as e:
+                    LOGGER.error(f"Error unregistering advertisement: {e}")
             # SystemBus() is shared, so the next manager re-exports this path
             self.advertisement.remove_from_connection()
             self.advertisement = None
@@ -428,10 +488,7 @@ class BluetoothManager:
             return []
         
         pairing_requests = []
-        current_time = time.time()
-        # rebuild rather than del while iterating, which skips the next request
-        self.agent.pairing_requests = [request for request in self.agent.pairing_requests
-                                       if current_time - request["when"] < self.pairing_accept_timeout]
+        self.prune_pairing_requests()
         for request in self.agent.pairing_requests:
             pairing_requests.append ({
                 'passkey': request["passkey"],
@@ -456,15 +513,31 @@ class BluetoothManager:
         self.db_conn.commit()
         LOGGER.info(f"Removed device {device_id} from database")
 
-    def remove_all_physical_pairings(self):
-        objects = self.om.GetManagedObjects()
-        removed_count = 0
-        for path, interfaces in objects.items():
-            if DEVICE_IFACE in interfaces:
-                if self.remove_physical_pairing(path):
-                    removed_count += 1
-        LOGGER.info(f"Removed {removed_count} paired devices")
-        return removed_count
+    def prune_pairing_requests(self):
+        if not self.agent:
+            return
+        current_time = time.time()
+        expired = [request for request in self.agent.pairing_requests
+                   if current_time - request["when"] >= self.pairing_accept_timeout]
+        # rebuild rather than del while iterating, which skips the next request
+        self.agent.pairing_requests = [request for request in self.agent.pairing_requests
+                                       if current_time - request["when"] < self.pairing_accept_timeout]
+        self.unpair_expired_requests(expired)
+
+    def unpair_expired_requests(self, expired):
+        # the agent confirms every pairing, so unpair devices nobody accepted in time
+        pending = {request["device"] for request in self.agent.pairing_requests}
+        for device_path in {request["device"] for request in expired} - pending:
+            address = self.device_address(device_path)
+            if address and not any(info["address"] == address for info in self.paired_devices.values()):
+                self.remove_physical_pairing(device_path)
+
+    def device_address(self, device_path):
+        try:
+            device = dbus.Interface(self.bus.get_object(BLUEZ_SERVICE_NAME, device_path), DBUS_PROP_IFACE)
+            return str(device.Get(DEVICE_IFACE, "Address"))
+        except dbus.exceptions.DBusException:
+            return None
 
     def accept_pairing_request(self, device, label):
         if self.agent:
@@ -477,7 +550,6 @@ class BluetoothManager:
                 return False
             # a device can have several requests queued; drop them all and pair once
             self.agent.pairing_requests = remaining
-            self.remove_all_physical_pairings()
             return True
         else:
             LOGGER.error("Agent not initialized")
@@ -487,6 +559,9 @@ class BluetoothManager:
         if self.agent:
             forgot = False
             if device in self.paired_devices:
+                device_path = self.find_device_by_address(self.paired_devices[device]["address"])
+                if device_path:
+                    self.remove_physical_pairing(device_path)
                 self.remove_device_from_db(device)
                 del self.paired_devices[device]
                 LOGGER.info(f"Known device forgotten: {device}")
@@ -630,10 +705,11 @@ class BluetoothManager:
         self.stop_advertising()
 
         if self.agent:
-            try:
-                self.agent_manager.UnregisterAgent(self.agent.get_path())
-            except dbus.exceptions.DBusException as e:
-                LOGGER.error(f"Error unregistering agent: {e}")
+            if not self.bluez_restarted:
+                try:
+                    self.agent_manager.UnregisterAgent(self.agent.get_path())
+                except dbus.exceptions.DBusException as e:
+                    LOGGER.error(f"Error unregistering agent: {e}")
             self.agent.remove_from_connection()
             self.agent = None
 
@@ -641,7 +717,11 @@ class BluetoothManager:
             self.signal_match.remove()
             self.signal_match = None
 
-        if self.discovery_active:
+        if self.bluez_watch:
+            self.bluez_watch.cancel()
+            self.bluez_watch = None
+
+        if self.discovery_active and not self.bluez_restarted:
             try:
                 self.adapter.StopDiscovery()
                 LOGGER.info("Discovery stopped")
@@ -688,6 +768,7 @@ class BluetoothManager:
             else:
                 LOGGER.debug("Discovery already active, skipping start")
             self.check_for_devices()
+            self.prune_pairing_requests()
         except dbus.exceptions.DBusException as e:
             LOGGER.error(f"Error during periodic scan: {e}")
         return True
@@ -707,9 +788,11 @@ class BluetoothManager:
             device_uuid = uuids[0] if uuids else ""
             device_id = str(uuid.uuid5(uuid.NAMESPACE_DNS, name + address))
             if self.is_known_device(device_id, address, name, device_uuid):
-                if not self.is_device_present(address):
-                    LOGGER.debug(f"Attempting to automatically connect to known device: {name} ({address})")
-                    self.auto_connect_device(address)
+                # a device that stays connected sends no new Connected events, so refresh it here
+                if properties.get("Connected", False):
+                    self.update_present_device(path)
+                else:
+                    self.check_device_in_range(path, address)
 
         # update present device list, removing devices not seen recently
         updated_present_devices = {}
@@ -720,75 +803,48 @@ class BluetoothManager:
                     updated_present_devices[device_id] = self.present_devices[device_id]
         self.present_devices = updated_present_devices
 
-    def auto_connect_device(self, address):
-        try:
-            device_path = self.find_device_by_address(address)
-            if device_path:
-                device = dbus.Interface(self.bus.get_object(BLUEZ_SERVICE_NAME, device_path), DBUS_PROP_IFACE)
-                props = device.GetAll(DEVICE_IFACE)
+    def check_device_in_range(self, device_path, address):
+        # Device.Connect() only succeeds if one of the device's profiles connects, which depends on
+        # the machine's audio and network setup. An L2CAP connection works for any device in range.
+        # It can take seconds, so run it off the main loop, at most once per PRESENCE_CHECK_SECONDS.
+        now = time.time()
+        if address in self.checks_in_flight or now - self.last_checks.get(address, 0) < PRESENCE_CHECK_SECONDS:
+            return
+        self.last_checks[address] = now
+        self.checks_in_flight.add(address)
+        future = asyncio.get_running_loop().run_in_executor(None, l2cap_reachable, address)
+        future.add_done_callback(lambda done: self.device_check_done(done, device_path, address))
 
-                if not props.get("Connected", False):
-                    connect_method = dbus.Interface(self.bus.get_object(BLUEZ_SERVICE_NAME, device_path), DEVICE_IFACE)
-                    connect_method.Connect()
-                    LOGGER.info(f"Successfully initiated connection to device: {address}")
-                else:
-                    LOGGER.debug(f"Device {address} is already connected")
-                    return True
-            else:
-                LOGGER.debug(f"Device {address} not found for auto-connection")
-        except dbus.exceptions.DBusException as e:
-            LOGGER.debug(f"Error auto-connecting to device {address}: {e}")
-        return False
-
-    def is_device_present(self, address):
-        try:
-            device_path = self.find_device_by_address(address)
-            if device_path:
-                device = dbus.Interface(self.bus.get_object(BLUEZ_SERVICE_NAME, device_path), DBUS_PROP_IFACE)
-                props = device.GetAll(DEVICE_IFACE)
-
-                connected = props.get("Connected", False)
-                rssi = props.get("RSSI")
-                timestamp = props.get("Timestamp")
-
-                LOGGER.debug(f"Device {address} present check: Connected={connected}, RSSI={rssi}, Timestamp available: {timestamp is not None}")
-
-                # Consider the device present if it's connected or has a valid RSSI
-                is_present = connected or (rssi is not None and rssi <= 0)
-
-                if timestamp is not None:
-                    current_time = int(time.time() * 1000)  # Convert to milliseconds
-                    time_difference = current_time - int(timestamp)
-                    LOGGER.debug(f"Device {address} last seen {time_difference} ms ago")
-                    is_present = is_present and time_difference < 30000
-
-                return is_present
-            else:
-                LOGGER.debug(f"Device {address} not found in object manager")
-                return False
-        except dbus.exceptions.DBusException as e:
-            LOGGER.error(f"Error checking device presence for {address}: {e}")
-            return False
+    def device_check_done(self, future, device_path, address):
+        self.checks_in_flight.discard(address)
+        if self.running and future.exception() is None and future.result():
+            LOGGER.debug(f"Known device in range: {address}")
+            try:
+                self.update_present_device(device_path)
+            except dbus.exceptions.DBusException as e:
+                LOGGER.debug(f"Unable to update present device {address}: {e}")
 
     def is_known_device(self, device_id, address, name, device_uuid):
         if device_id in self.paired_devices:
             LOGGER.debug(f"Device {name} ({address}) found in paired_devices by ID")
             return True
     
-        # update device info if it changed
+        # match on address only: names and the first service UUID are shared across many
+        # devices. A bonded device keeps its address, because BlueZ resolves its rotating
+        # private address to its identity address.
         for stored_id, stored_info in self.paired_devices.items():
-            # note that we have matching by name commented out as it would likely be too insecure
-            if (stored_info['address'] == address or 
-            #    (name != "<unknown>" and stored_info['name'] == name) or 
-                (device_uuid and stored_info['uuid'] == device_uuid)):
+            if stored_info['address'] == address:
                 LOGGER.debug(f"Device {name} ({address}) matched with stored device {stored_info['name']} ({stored_info['address']})")
                 updated_name = name if name != "<unknown>" else f"Unknown Device ({address[-6:]})"
-                self.paired_devices[stored_id] = {
+                updated_info = {
                     'address': address,
                     'name': updated_name,
                     'uuid': device_uuid
                 }
-                self.update_device_in_db(stored_id, address, updated_name, device_uuid)
+                # the scan runs every second, so only write to the database when something changed
+                if updated_info != stored_info:
+                    self.paired_devices[stored_id] = updated_info
+                    self.update_device_in_db(stored_id, address, updated_name, device_uuid)
                 return True
     
         LOGGER.debug(f"Device {name} ({address}) is not a known device")
