@@ -497,9 +497,11 @@ class BluetoothManager:
             if len(remaining) == len(self.agent.pairing_requests):
                 LOGGER.warning(f"No pairing request found for device: {device}")
                 return False
+            # keep the request queued on failure so it can be retried until it expires
+            if not self.add_paired_device(device, label):
+                return False
             # a device can have several requests queued; drop them all and pair once
             self.agent.pairing_requests = remaining
-            self.add_paired_device(device, label)
             self.remove_all_physical_pairings()
             return True
         else:
@@ -553,9 +555,13 @@ class BluetoothManager:
             name = device.Get(DEVICE_IFACE, "Name")
         except dbus.exceptions.DBusException:
             LOGGER.error(f"Unable to get device properties for {device_path}")
-            return
+            return False
 
-        uuids = device.Get(DEVICE_IFACE, "UUIDs")
+        try:
+            uuids = device.Get(DEVICE_IFACE, "UUIDs")
+        except dbus.exceptions.DBusException:
+            # BlueZ omits UUIDs for devices that advertise no services
+            uuids = []
         device_uuid = uuids[0] if uuids else ""
         device_id = label or str(uuid.uuid5(uuid.NAMESPACE_DNS, name + address))
 
@@ -566,6 +572,7 @@ class BluetoothManager:
         }
         self.update_device_in_db(device_id, address, name, device_uuid)
         LOGGER.info(f"Added paired device to database: {name} ({address})")
+        return True
 
 
     async def start(self):
