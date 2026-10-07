@@ -584,19 +584,20 @@ class BluetoothManager:
         
         uuids = device.Get(DEVICE_IFACE, "UUIDs")
         device_uuid = uuids[0] if uuids else ""
-        device_id = str(uuid.uuid5(uuid.NAMESPACE_DNS, name + address))
+        self.mark_present(address, name, device_uuid)
 
-        # device ID can be user selected, try to match on address
+    def mark_present(self, address, name=None, device_uuid=None):
+        # the same device can be stored more than once (for example, paired again for another person),
+        # so mark every known-device record with this address present
+        now = time.time()
         for stored_id, stored_info in self.paired_devices.items():
-            if address == stored_info["address"]:
-                device_id = stored_id
-
-        self.present_devices[device_id] = {
-            'address': address,
-            'name': name,
-            'uuid': device_uuid,
-            'when': time.time()
-        }       
+            if stored_info["address"] == address:
+                self.present_devices[stored_id] = {
+                    'address': address,
+                    'name': name or stored_info["name"],
+                    'uuid': stored_info["uuid"] if device_uuid is None else device_uuid,
+                    'when': now
+                }
 
     def add_paired_device(self, device_path, label):
         device = dbus.Interface(self.bus.get_object(BLUEZ_SERVICE_NAME, device_path), DBUS_PROP_IFACE)
@@ -770,6 +771,7 @@ class BluetoothManager:
 
     def check_for_devices(self):
         objects = self.om.GetManagedObjects()
+        checked = set()
         for path, interfaces in objects.items():
             if DEVICE_IFACE not in interfaces:
                 continue
@@ -782,11 +784,19 @@ class BluetoothManager:
             device_uuid = uuids[0] if uuids else ""
             device_id = str(uuid.uuid5(uuid.NAMESPACE_DNS, name + address))
             if self.is_known_device(device_id, address, name, device_uuid):
+                checked.add(address)
                 # a device that stays connected sends no new Connected events, so refresh it here
                 if properties.get("Connected", False):
                     self.update_present_device(path)
                 else:
-                    self.check_device_in_range(path, address)
+                    self.check_device_in_range(address)
+
+        # devices accepted by v0.2.1 had their BlueZ pairing removed, and without discovery BlueZ
+        # doesn't list them. The L2CAP check doesn't need a pairing, so check them by stored address.
+        for info in list(self.paired_devices.values()):
+            if info["address"] not in checked:
+                checked.add(info["address"])
+                self.check_device_in_range(info["address"])
 
         # update present device list, removing devices not seen recently
         updated_present_devices = {}
@@ -797,7 +807,7 @@ class BluetoothManager:
                     updated_present_devices[device_id] = self.present_devices[device_id]
         self.present_devices = updated_present_devices
 
-    def check_device_in_range(self, device_path, address):
+    def check_device_in_range(self, address):
         # Device.Connect() only succeeds if one of the device's profiles connects, which depends on
         # the machine's audio and network setup. An L2CAP connection works for any device in range.
         # It can take seconds, so run it off the main loop, at most once per PRESENCE_CHECK_SECONDS.
@@ -807,16 +817,13 @@ class BluetoothManager:
         self.last_checks[address] = now
         self.checks_in_flight.add(address)
         future = asyncio.get_running_loop().run_in_executor(None, l2cap_reachable, address)
-        future.add_done_callback(lambda done: self.device_check_done(done, device_path, address))
+        future.add_done_callback(lambda done: self.device_check_done(done, address))
 
-    def device_check_done(self, future, device_path, address):
+    def device_check_done(self, future, address):
         self.checks_in_flight.discard(address)
         if self.running and future.exception() is None and future.result():
             LOGGER.debug(f"Known device in range: {address}")
-            try:
-                self.update_present_device(device_path)
-            except dbus.exceptions.DBusException as e:
-                LOGGER.debug(f"Unable to update present device {address}: {e}")
+            self.mark_present(address)
 
     def is_known_device(self, device_id, address, name, device_uuid):
         if device_id in self.paired_devices:
