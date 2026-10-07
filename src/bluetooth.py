@@ -681,9 +681,9 @@ class BluetoothManager:
             LOGGER.error(f"Failed to register agent: {e}")
             raise RuntimeError("Failed to register Bluetooth agent.")
 
-        self.adapter.SetDiscoveryFilter({'Transport': 'le'})
-        self.adapter.StartDiscovery()
-        self.discovery_active = True
+        # no discovery: presence checks known devices by address, and phones find this machine through
+        # its advertisement. Continuous scanning in a crowded room delays the controller enough that the
+        # kernel drops a phone's pairing request (IO Capability Request) before it knows the phone does SSP.
 
         LOGGER.info(f'Bluetooth Manager started with custom name "{self.custom_name}" and is now discoverable.')
         self.load_paired_devices()
@@ -761,12 +761,6 @@ class BluetoothManager:
     async def periodic_scan(self):
         LOGGER.debug("Performing periodic scan...")
         try:
-            if not self.discovery_active:
-                self.adapter.StartDiscovery()
-                self.discovery_active = True
-                LOGGER.debug("Discovery started")
-            else:
-                LOGGER.debug("Discovery already active, skipping start")
             self.check_for_devices()
             self.prune_pairing_requests()
         except dbus.exceptions.DBusException as e:
