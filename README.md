@@ -47,7 +47,7 @@ The following attributes are available for `viam-soleng:presence:bluetooth` sens
 | Name | Type | Inclusion | Description |
 | ---- | ---- | --------- | ----------- |
 | `advertisement_name` | string | Optional | The name that the device running this module will advertise itself as.  Default is "Viam Presence"  |
-| `pairing_accept_timeout` | integer | Optional |  The duration in seconds for which a pairing request is valid and will show via get_readings. Default is 60. |
+| `pairing_accept_timeout` | integer | Optional |  The duration in seconds for which a pairing request is valid and will show via get_readings. Default is 180. |
 | `device_present_linger` | integer | Optional |  The duration in seconds for which a device is considered present after last seen. Default is 30. |
 | `initiate_pairing` | boolean | Optional | Start pairing from this machine when an unpaired phone connects but doesn't start pairing within 3 seconds. Works around phones failing with "Can't connect" on JetPack 6. Default is false. |
 
@@ -56,7 +56,7 @@ The following attributes are available for `viam-soleng:presence:bluetooth` sens
 ```json
 {
   "advertisement_name" : "My BT detector",
-  "pairing_accept_timeout": 60,
+  "pairing_accept_timeout": 180,
   "device_present_linger": 30
 }
 ```

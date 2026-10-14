@@ -199,7 +199,7 @@ class bluetooth(Sensor, Reconfigurable):
             self.manager = None
 
         self.advertisement_name = config.attributes.fields["advertisement_name"].string_value or "Viam Presence"
-        self.pairing_accept_timeout = int(config.attributes.fields["pairing_accept_timeout"].number_value) or 60
+        self.pairing_accept_timeout = int(config.attributes.fields["pairing_accept_timeout"].number_value) or 180
         self.device_present_linger = int(config.attributes.fields["device_present_linger"].number_value) or 30
         self.initiate_pairing = config.attributes.fields["initiate_pairing"].bool_value
         try:
@@ -388,7 +388,7 @@ class Agent(dbus.service.Object):
             LOGGER.error("BluetoothManager reference not set in Agent")
 
 class BluetoothManager:
-    def __init__(self, auto_accept=False, custom_name="Viam Presence", pairing_accept_timeout=60, device_present_linger=30, initiate_pairing=False):
+    def __init__(self, auto_accept=False, custom_name="Viam Presence", pairing_accept_timeout=180, device_present_linger=30, initiate_pairing=False):
         dbus.mainloop.glib.DBusGMainLoop(set_as_default=True)
         self.bus = dbus.SystemBus()
         
