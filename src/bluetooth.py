@@ -51,6 +51,10 @@ PRESENCE_CHECK_SECONDS = 10
 # so check an unreachable device less and less often, up to this interval
 PRESENCE_CHECK_MAX_SECONDS = 120
 SDP_PSM = 1
+# how long a connecting phone gets to start pairing by itself before the machine starts it
+PAIRING_GRACE_SECONDS = 3
+# don't start pairing with the same phone again within this time
+PAIRING_RETRY_SECONDS = 60
 
 # audio profiles, rejected so phones don't use the machine as a speaker or headset
 AUDIO_SERVICE_UUIDS = {
@@ -197,6 +201,7 @@ class bluetooth(Sensor, Reconfigurable):
         self.advertisement_name = config.attributes.fields["advertisement_name"].string_value or "Viam Presence"
         self.pairing_accept_timeout = int(config.attributes.fields["pairing_accept_timeout"].number_value) or 60
         self.device_present_linger = int(config.attributes.fields["device_present_linger"].number_value) or 30
+        self.initiate_pairing = config.attributes.fields["initiate_pairing"].bool_value
         try:
             asyncio.ensure_future(self.start_btmanager())
         except Exception as e:
@@ -215,7 +220,8 @@ class bluetooth(Sensor, Reconfigurable):
             manager = None
             try:
                 manager = BluetoothManager(auto_accept=False, custom_name=self.advertisement_name,
-                                           pairing_accept_timeout=self.pairing_accept_timeout, device_present_linger=self.device_present_linger)
+                                           pairing_accept_timeout=self.pairing_accept_timeout, device_present_linger=self.device_present_linger,
+                                           initiate_pairing=self.initiate_pairing)
                 self.manager = manager
                 self.bus = dbus.SystemBus()
                 await manager.start()
@@ -382,7 +388,7 @@ class Agent(dbus.service.Object):
             LOGGER.error("BluetoothManager reference not set in Agent")
 
 class BluetoothManager:
-    def __init__(self, auto_accept=False, custom_name="Viam Presence", pairing_accept_timeout=60, device_present_linger=30):
+    def __init__(self, auto_accept=False, custom_name="Viam Presence", pairing_accept_timeout=60, device_present_linger=30, initiate_pairing=False):
         dbus.mainloop.glib.DBusGMainLoop(set_as_default=True)
         self.bus = dbus.SystemBus()
         
@@ -402,6 +408,8 @@ class BluetoothManager:
         self.present_devices = {}
         self.last_checks = {}
         self.check_intervals = {}
+        self.initiate_pairing = initiate_pairing
+        self.pairing_initiated = {}
         self.checks_in_flight = set()
         # we could make this configurable but it should be stable here
         self.db_conn = sqlite3.connect( str(Path.home()) + '/.viam/paired_devices.db')        
@@ -442,7 +450,37 @@ class BluetoothManager:
         # check_for_devices keeps only known devices, so a device mid-pairing is harmless here.
         if changed.get("Connected"):
             self.update_present_device(path)
-            
+            if self.initiate_pairing:
+                asyncio.get_event_loop().call_later(PAIRING_GRACE_SECONDS, self.start_pairing_if_stalled, path)
+
+    def start_pairing_if_stalled(self, device_path):
+        # On JetPack 6 kernels, a phone's pairing request can arrive before the kernel knows the phone
+        # supports Secure Simple Pairing. The kernel then drops it, and the phone gives up after 30 s with
+        # "Can't connect". Pairing started from this side doesn't hit that race.
+        # Only unpaired, unknown devices qualify: the module's presence checks connect only to known
+        # devices, and NetworkManager tethering only to paired ones, so this is an incoming connection.
+        if not self.running or not self.agent:
+            return
+        try:
+            device = dbus.Interface(self.bus.get_object(BLUEZ_SERVICE_NAME, device_path), DBUS_PROP_IFACE)
+            props = device.GetAll(DEVICE_IFACE)
+        except dbus.exceptions.DBusException:
+            return
+        address = str(props.get("Address", ""))
+        if not props.get("Connected", False) or props.get("Paired", False):
+            return
+        if any(info["address"] == address for info in self.paired_devices.values()):
+            return
+        if any(request["device"] == device_path for request in self.agent.pairing_requests):
+            return
+        if time.time() - self.pairing_initiated.get(address, 0) < PAIRING_RETRY_SECONDS:
+            return
+        self.pairing_initiated[address] = time.time()
+        LOGGER.info(f"Device {address} connected but hasn't started pairing; starting pairing from this side")
+        dbus.Interface(self.bus.get_object(BLUEZ_SERVICE_NAME, device_path), DEVICE_IFACE).Pair(
+            reply_handler=lambda: LOGGER.info(f"Pairing started from this side completed with {address}"),
+            error_handler=lambda e: LOGGER.warning(f"Pairing started from this side failed with {address}: {e}"))
+
     def create_db_table(self):
         cursor = self.db_conn.cursor()
         cursor.execute('''
