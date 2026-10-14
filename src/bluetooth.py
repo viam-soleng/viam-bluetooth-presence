@@ -47,6 +47,9 @@ AGENT_MANAGER_IFACE = 'org.bluez.AgentManager1'
 LOGGER = getLogger(__name__)
 
 PRESENCE_CHECK_SECONDS = 10
+# while the radio pages an absent device (about 5 s per attempt) it can't hear phones trying to pair,
+# so check an unreachable device less and less often, up to this interval
+PRESENCE_CHECK_MAX_SECONDS = 120
 SDP_PSM = 1
 
 # audio profiles, rejected so phones don't use the machine as a speaker or headset
@@ -380,6 +383,7 @@ class BluetoothManager:
         self.paired_devices = {}
         self.present_devices = {}
         self.last_checks = {}
+        self.check_intervals = {}
         self.checks_in_flight = set()
         # we could make this configurable but it should be stable here
         self.db_conn = sqlite3.connect( str(Path.home()) + '/.viam/paired_devices.db')        
@@ -590,6 +594,8 @@ class BluetoothManager:
         # the same device can be stored more than once (for example, paired again for another person),
         # so mark every known-device record with this address present
         now = time.time()
+        # the device is back, so check it at the normal rate again
+        self.check_intervals.pop(address, None)
         for stored_id, stored_info in self.paired_devices.items():
             if stored_info["address"] == address:
                 self.present_devices[stored_id] = {
@@ -812,7 +818,8 @@ class BluetoothManager:
         # the machine's audio and network setup. An L2CAP connection works for any device in range.
         # It can take seconds, so run it off the main loop, at most once per PRESENCE_CHECK_SECONDS.
         now = time.time()
-        if address in self.checks_in_flight or now - self.last_checks.get(address, 0) < PRESENCE_CHECK_SECONDS:
+        interval = self.check_intervals.get(address, PRESENCE_CHECK_SECONDS)
+        if address in self.checks_in_flight or now - self.last_checks.get(address, 0) < interval:
             return
         self.last_checks[address] = now
         self.checks_in_flight.add(address)
@@ -824,6 +831,9 @@ class BluetoothManager:
         if self.running and future.exception() is None and future.result():
             LOGGER.debug(f"Known device in range: {address}")
             self.mark_present(address)
+        else:
+            interval = self.check_intervals.get(address, PRESENCE_CHECK_SECONDS)
+            self.check_intervals[address] = min(interval * 2, PRESENCE_CHECK_MAX_SECONDS)
 
     def is_known_device(self, device_id, address, name, device_uuid):
         if device_id in self.paired_devices:
