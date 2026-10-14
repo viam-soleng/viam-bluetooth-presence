@@ -65,6 +65,24 @@ AUDIO_SERVICE_UUIDS = {
     "0000111f-0000-1000-8000-00805f9b34fb",  # Hands-Free audio gateway
 }
 
+def unblock_bluetooth_rfkill(rfkill_dir=Path("/sys/class/rfkill")):
+    # a desktop Bluetooth toggle or airplane mode leaves the radio soft-blocked, and systemd restores
+    # that block at every boot. BlueZ then refuses to power the adapter (org.bluez.Error.Busy).
+    unblocked = False
+    for rfkill in sorted(rfkill_dir.glob("rfkill*")):
+        try:
+            if (rfkill / "type").read_text().strip() != "bluetooth":
+                continue
+            if (rfkill / "hard").read_text().strip() == "1":
+                LOGGER.error(f"Bluetooth is hard-blocked by a hardware switch ({rfkill.name}); it can't be turned on in software")
+            if (rfkill / "soft").read_text().strip() == "1":
+                (rfkill / "soft").write_text("0")
+                LOGGER.warning(f"Bluetooth was turned off (rfkill soft block on {rfkill.name}); turned it back on")
+                unblocked = True
+        except OSError as e:
+            LOGGER.error(f"Unable to check or clear the rfkill block on {rfkill.name}: {e}")
+    return unblocked
+
 def l2cap_reachable(address):
     # every BR/EDR device answers on the SDP channel, so connecting to it shows the device is in range
     sock = socket.socket(socket.AF_BLUETOOTH, socket.SOCK_SEQPACKET, socket.BTPROTO_L2CAP)
@@ -669,6 +687,9 @@ class BluetoothManager:
             LOGGER.warning(f"Error during cleanup: {e}")
 
         # Now proceed with normal startup
+        if unblock_bluetooth_rfkill():
+            # give BlueZ a moment to see the radio unblocked before powering the adapter
+            await asyncio.sleep(1)
         self.adapter_props.Set(ADAPTER_IFACE, "Powered", dbus.Boolean(True))
         self.adapter_props.Set(ADAPTER_IFACE, "Discoverable", dbus.Boolean(True))
         self.adapter_props.Set(ADAPTER_IFACE, "DiscoverableTimeout", dbus.UInt32(0))
